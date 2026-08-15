@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "tim.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -27,6 +28,11 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+
+
+#define BLANK     0xFF
+#define ERR_DASH  0xFE
+#define COLON_BIT (1U << 4)
 
 /* USER CODE END PTD */
 
@@ -44,11 +50,6 @@
 
 /* USER CODE BEGIN PV */
 
-static const uint8_t segment_map[10] =
-{
-    0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F
-};
-#define COLON_BIT (1U << 4)
 
 /* USER CODE END PV */
 
@@ -61,31 +62,75 @@ void SystemClock_Config(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+
+static volatile uint8_t digits[4] = {0};
+static volatile uint8_t colon_on = 1;
+static volatile uint8_t mux_index = 0;
+
+static const uint8_t segment_map[10] =
+{
+    0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F
+};
+
+void gpio_init(void)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+
+    GPIO_InitStruct.Pin   = SR_DATA_Pin | SR_CLK_Pin | SR_LATCH_Pin;
+    GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull  = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(SR_GPIO_Port, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = SR_OE_Pin;
+    HAL_GPIO_Init(SR_OE_Port, &GPIO_InitStruct);
+
+    HAL_GPIO_WritePin(SR_OE_Port, SR_OE_Pin, GPIO_PIN_SET); // OE_OFF start
+}
+
 void shift16(uint16_t value)
 {
     for (int i = 15; i >= 0; i--)
     {
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1,
-            (value & (1U << i)) ? GPIO_PIN_SET : GPIO_PIN_RESET); // SER
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2, GPIO_PIN_SET);       // SRCLK
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(SR_GPIO_Port, SR_DATA_Pin,
+            (value & (1U << i)) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+        HAL_GPIO_WritePin(SR_GPIO_Port, SR_CLK_Pin, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(SR_GPIO_Port, SR_CLK_Pin, GPIO_PIN_RESET);
     }
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_SET);           // RCLK
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_RESET);
+
+    HAL_GPIO_WritePin(SR_GPIO_Port, SR_LATCH_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(SR_GPIO_Port, SR_LATCH_Pin, GPIO_PIN_RESET);
 }
 
-void multiplex_test(void)
+void multiplex_step(void)
 {
-    for (uint8_t i = 0; i < 4; i++)
+    uint8_t i = mux_index;
+    uint8_t segment;
+
+    if (digits[i] < 10) segment = segment_map[digits[i]];
+    else if (digits[i] == ERR_DASH) segment = 0x40;
+    else segment = 0x00;
+
+    uint8_t ctrl = (1 << i);
+    if (colon_on) ctrl |= COLON_BIT;
+    segment |= 0x80;
+
+    HAL_GPIO_WritePin(SR_OE_Port, SR_OE_Pin, GPIO_PIN_SET);   // OE_OFF
+    shift16(((uint16_t)ctrl << 8) | segment);
+    HAL_GPIO_WritePin(SR_OE_Port, SR_OE_Pin, GPIO_PIN_RESET); // OE_ON
+
+    mux_index = (i + 1) & 0x03;
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM10)
     {
-        uint8_t segment = segment_map[8] | 0x80;
-        uint8_t ctrl = (1 << i) | COLON_BIT;
-
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
-        shift16(((uint16_t)ctrl << 8) | segment);
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
-
-        HAL_Delay(500);
+        multiplex_step();
     }
 }
 
@@ -121,7 +166,20 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_TIM10_Init();
   /* USER CODE BEGIN 2 */
+
+
+  gpio_init();
+  HAL_TIM_Base_Start_IT(&htim10);
+
+  // тест - "12:13"
+  digits[0] = 1;
+  digits[1] = 2;
+  digits[2] = 3;
+  digits[3] = 4;
+  colon_on = 1;
+
 
   /* USER CODE END 2 */
 
@@ -130,7 +188,9 @@ int main(void)
   while (1)
   {
 
-	  multiplex_test();
+
+
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -155,10 +215,14 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 25;
+  RCC_OscInitStruct.PLL.PLLN = 192;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+  RCC_OscInitStruct.PLL.PLLQ = 4;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -168,12 +232,12 @@ void SystemClock_Config(void)
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_3) != HAL_OK)
   {
     Error_Handler();
   }

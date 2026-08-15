@@ -60,6 +60,13 @@ void Error_Handler(void);
 
 /* USER CODE BEGIN Private defines */
 
+#define SR_DATA_Pin   GPIO_PIN_1   // PA1 - SER
+#define SR_CLK_Pin    GPIO_PIN_2   // PA2 - SRCLK
+#define SR_LATCH_Pin  GPIO_PIN_3   // PA3 - RCLK
+#define SR_GPIO_Port  GPIOA
+#define SR_OE_Pin     GPIO_PIN_0   // PB0 - OE
+#define SR_OE_Port    GPIOB
+
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus
