@@ -67,6 +67,8 @@ void Error_Handler(void);
 #define SR_OE_Pin     GPIO_PIN_0   // PB0 - OE
 #define SR_OE_Port    GPIOB
 
+#define DS3231_ADDR (0x68 << 1)
+
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

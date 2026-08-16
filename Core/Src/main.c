@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "i2c.h"
 #include "tim.h"
 #include "gpio.h"
 
@@ -33,6 +34,62 @@
 #define BLANK     0xFF
 #define ERR_DASH  0xFE
 #define COLON_BIT (1U << 4)
+
+typedef struct
+{
+    uint8_t hours;
+    uint8_t minutes;
+    uint8_t seconds;
+} Time;
+
+typedef struct
+{
+    uint8_t day;
+    uint8_t month;
+    uint8_t year;
+} Date;
+
+HAL_StatusTypeDef ds3231_read(Time *t, Date *d);
+HAL_StatusTypeDef ds3231_set_time(Time t, Date d);
+
+static uint8_t to_bcd(uint8_t v)   { return ((v / 10) << 4) | (v % 10); }
+static uint8_t from_bcd(uint8_t v) { return ((v >> 4) * 10) + (v & 0x0F); }
+
+HAL_StatusTypeDef ds3231_read(Time *t, Date *d)
+{
+    uint8_t buf[7];
+    HAL_StatusTypeDef status;
+
+    status = HAL_I2C_Mem_Read(&hi2c1, DS3231_ADDR, 0x00,
+                               I2C_MEMADD_SIZE_8BIT, buf, 7, HAL_MAX_DELAY);
+    if (status != HAL_OK) return status;
+
+    t->seconds = from_bcd(buf[0] & 0x7F);
+    t->minutes = from_bcd(buf[1]);
+    t->hours   = from_bcd(buf[2] & 0x3F);
+
+    d->day     = from_bcd(buf[4]);
+    d->month   = from_bcd(buf[5] & 0x1F);
+    d->year    = from_bcd(buf[6]);
+
+    return HAL_OK;
+}
+
+HAL_StatusTypeDef ds3231_set_time(Time t, Date d)
+{
+    uint8_t buf[7];
+
+    buf[0] = to_bcd(t.seconds);
+    buf[1] = to_bcd(t.minutes);
+    buf[2] = to_bcd(t.hours);
+    buf[3] = 1;
+    buf[4] = to_bcd(d.day);
+    buf[5] = to_bcd(d.month);
+    buf[6] = to_bcd(d.year);
+
+    return HAL_I2C_Mem_Write(&hi2c1, DS3231_ADDR, 0x00,
+                              I2C_MEMADD_SIZE_8BIT, buf, 7, HAL_MAX_DELAY);
+}
 
 /* USER CODE END PTD */
 
@@ -167,18 +224,17 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_TIM10_Init();
+  MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
 
 
   gpio_init();
   HAL_TIM_Base_Start_IT(&htim10);
 
-  // тест - "12:13"
-  digits[0] = 1;
-  digits[1] = 2;
-  digits[2] = 3;
-  digits[3] = 4;
-  colon_on = 1;
+
+  Time t = { .hours = 07, .minutes = 50, .seconds = 0 };
+  Date d = { .day = 16, .month = 8, .year = 26 };
+  // ds3231_set_time(t, d); //set TIME
 
 
   /* USER CODE END 2 */
@@ -188,6 +244,24 @@ int main(void)
   while (1)
   {
 
+
+	  static uint32_t last_read = 0;
+
+	  if (HAL_GetTick() - last_read >= 200)
+	  {
+	      last_read = HAL_GetTick();
+
+	      Time t;
+	      Date d;
+	      if (ds3231_read(&t, &d) == HAL_OK)
+	      {
+	          digits[0] = t.hours / 10;
+	          digits[1] = t.hours % 10;
+	          digits[2] = t.minutes / 10;
+	          digits[3] = t.minutes % 10;
+	          colon_on = 1;
+	      }
+	  }
 
 
 
