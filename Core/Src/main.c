@@ -25,6 +25,12 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
+
+#include "ssd1306.h"
+#include "ssd1306_fonts.h"
+#include <stdio.h>
+#include <string.h>
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -231,6 +237,10 @@ int main(void)
   gpio_init();
   HAL_TIM_Base_Start_IT(&htim10);
 
+  ssd1306_Init();
+  ssd1306_Fill(Black);
+  ssd1306_UpdateScreen();
+
 
   Time t = { .hours = 07, .minutes = 50, .seconds = 0 };
   Date d = { .day = 16, .month = 8, .year = 26 };
@@ -255,12 +265,36 @@ int main(void)
 	      Date d;
 	      if (ds3231_read(&t, &d) == HAL_OK)
 	      {
-	          digits[0] = t.hours / 10;
-	          digits[1] = t.hours % 10;
-	          digits[2] = t.minutes / 10;
-	          digits[3] = t.minutes % 10;
-	          colon_on = 1;
-	      }
+				digits[0] = t.hours / 10;
+				digits[1] = t.hours % 10;
+				digits[2] = t.minutes / 10;
+				digits[3] = t.minutes % 10;
+				colon_on = 1;
+
+				static char last_time[16] = "";
+				char time_str[16];
+				char date_str[16];
+
+				sprintf(time_str, "%02d:%02d:%02d", t.hours, t.minutes,
+						t.seconds);
+
+				if (strcmp(time_str, last_time) != 0) {
+					strcpy(last_time, time_str);
+
+					sprintf(date_str, "%02d.%02d.20%02d", d.day, d.month,
+							d.year);
+
+					ssd1306_Fill(Black);
+
+					ssd1306_SetCursor(0, 0);
+					ssd1306_WriteString(time_str, Font_11x18, White);
+
+					ssd1306_SetCursor(0, 24);
+					ssd1306_WriteString(date_str, Font_7x10, White);
+
+					ssd1306_UpdateScreen();
+				}
+			}
 	  }
 
 
