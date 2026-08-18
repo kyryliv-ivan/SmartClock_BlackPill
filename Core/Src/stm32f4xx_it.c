@@ -214,4 +214,18 @@ void TIM1_UP_TIM10_IRQHandler(void)
 
 /* USER CODE BEGIN 1 */
 
+/**
+  * @brief This function handles EXTI line[15:10] interrupts.
+  * NOTE: hand-added (not CubeMX-managed) because the encoder EXTI pins
+  * (PB12/13/14) are configured directly in main.c's gpio_init(), not
+  * through the CubeMX pin panel. Kept in this USER CODE block on purpose -
+  * anywhere else in this file gets wiped on the next "Generate Code".
+  */
+void EXTI15_10_IRQHandler(void)
+{
+  HAL_GPIO_EXTI_IRQHandler(ENC_CLK_Pin);
+  HAL_GPIO_EXTI_IRQHandler(ENC_DT_Pin);
+  HAL_GPIO_EXTI_IRQHandler(ENC_SW_Pin);
+}
+
 /* USER CODE END 1 */

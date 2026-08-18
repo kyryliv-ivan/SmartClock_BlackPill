@@ -67,6 +67,11 @@ void Error_Handler(void);
 #define SR_OE_Pin     GPIO_PIN_0   // PB0 - OE
 #define SR_OE_Port    GPIOB
 
+#define ENC_CLK_Pin   GPIO_PIN_12  // PB12 - encoder EC11 channel A
+#define ENC_DT_Pin    GPIO_PIN_13  // PB13 - encoder EC11 channel B
+#define ENC_SW_Pin    GPIO_PIN_14  // PB14 - encoder EC11 push button
+#define ENC_GPIO_Port GPIOB
+
 #define DS3231_ADDR (0x68 << 1)
 
 /* USER CODE END Private defines */

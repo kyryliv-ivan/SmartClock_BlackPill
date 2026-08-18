@@ -10,14 +10,30 @@ void ssd1306_Reset(void) {
     /* for I2C - do nothing */
 }
 
+/* Bounded timeout instead of HAL_MAX_DELAY: a wedged/glitched I2C bus
+   (e.g. clock stretching that never releases) would otherwise block the
+   whole main loop forever, with no way to recover. On failure, reset the
+   peripheral so the next write starts a fresh transaction instead of
+   repeating the same stuck one. */
+#define SSD1306_I2C_TIMEOUT_MS 50
+
+static void ssd1306_i2c_recover(void) {
+    HAL_I2C_DeInit(&SSD1306_I2C_PORT);
+    HAL_I2C_Init(&SSD1306_I2C_PORT);
+}
+
 // Send a byte to the command register
 void ssd1306_WriteCommand(uint8_t byte) {
-    HAL_I2C_Mem_Write(&SSD1306_I2C_PORT, SSD1306_I2C_ADDR, 0x00, 1, &byte, 1, HAL_MAX_DELAY);
+    if (HAL_I2C_Mem_Write(&SSD1306_I2C_PORT, SSD1306_I2C_ADDR, 0x00, 1, &byte, 1, SSD1306_I2C_TIMEOUT_MS) != HAL_OK) {
+        ssd1306_i2c_recover();
+    }
 }
 
 // Send data
 void ssd1306_WriteData(uint8_t* buffer, size_t buff_size) {
-    HAL_I2C_Mem_Write(&SSD1306_I2C_PORT, SSD1306_I2C_ADDR, 0x40, 1, buffer, buff_size, HAL_MAX_DELAY);
+    if (HAL_I2C_Mem_Write(&SSD1306_I2C_PORT, SSD1306_I2C_ADDR, 0x40, 1, buffer, buff_size, SSD1306_I2C_TIMEOUT_MS) != HAL_OK) {
+        ssd1306_i2c_recover();
+    }
 }
 
 #elif defined(SSD1306_USE_SPI)

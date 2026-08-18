@@ -64,8 +64,11 @@ void HAL_TIM_Base_MspInit(TIM_HandleTypeDef* tim_baseHandle)
     /* TIM10 clock enable */
     __HAL_RCC_TIM10_CLK_ENABLE();
 
-    /* TIM10 interrupt Init */
-    HAL_NVIC_SetPriority(TIM1_UP_TIM10_IRQn, 2, 0);
+    /* TIM10 interrupt Init - priority 0 is the highest in this project on
+       purpose: it drives the LED time display multiplex, which must never
+       be delayed by anything else (encoder EXTI, future peripherals, ...).
+       Every other interrupt here should stay at priority >=1. */
+    HAL_NVIC_SetPriority(TIM1_UP_TIM10_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(TIM1_UP_TIM10_IRQn);
   /* USER CODE BEGIN TIM10_MspInit 1 */
 

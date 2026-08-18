@@ -20,6 +20,7 @@
 #include "main.h"
 #include "i2c.h"
 #include "tim.h"
+#include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -138,6 +139,115 @@ static const uint8_t segment_map[10] =
     0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F
 };
 
+/* --- OLED menu (opened by a tap on the encoder) -------------------------
+   Font_7x10/Font_11x18 only cover ASCII, so labels stay in Latin/English -
+   there is no Cyrillic glyph data in ssd1306_fonts.
+
+   Three levels: CLOCK -> MENU (Alarm/Radio/WiFi, rotate to move) -> tap
+   opens that item's own list (SUBMENU, rotate to move) -> tap on a list
+   entry performs the action and drops straight back to CLOCK. */
+typedef enum { UI_CLOCK, UI_MENU, UI_SUBMENU } ui_mode_t;
+typedef enum { MENU_ALARM, MENU_RADIO, MENU_WIFI, MENU_COUNT } menu_item_t;
+
+static const char *menu_labels[MENU_COUNT] = { "Alarm", "Radio", "WiFi" };
+
+/* Radio station names - must stay in the same order as `stations[]` on the
+   ESP32 side (see ESP32/SmartClock_ESP32/SmartClock_ESP32.ino), since only
+   the index is sent over UART, never the name. */
+static const char *radio_labels[] = { "Hit FM", "Radio ROKS", "Kiss FM" };
+#define RADIO_COUNT (sizeof(radio_labels) / sizeof(radio_labels[0]))
+
+/* Placeholders - real Alarm/WiFi behaviour (time editor, status readout,
+   ...) is still to be designed; these just make the 3-level menu testable
+   end-to-end today. */
+static const char *alarm_labels[] = { "Off", "On" };
+#define ALARM_COUNT (sizeof(alarm_labels) / sizeof(alarm_labels[0]))
+
+static const char *wifi_labels[] = { "Status", "Reconnect" };
+#define WIFI_COUNT (sizeof(wifi_labels) / sizeof(wifi_labels[0]))
+
+static const char *const *submenu_labels(menu_item_t item, uint8_t *count)
+{
+    switch (item)
+    {
+        case MENU_ALARM: *count = ALARM_COUNT; return alarm_labels;
+        case MENU_RADIO: *count = RADIO_COUNT; return radio_labels;
+        case MENU_WIFI:  *count = WIFI_COUNT;  return wifi_labels;
+        default:         *count = 0;           return NULL;
+    }
+}
+
+static void send_station_to_esp32(uint8_t index)
+{
+    char line[16];
+    int len = snprintf(line, sizeof(line), "STATION:%u\n", (unsigned)index);
+
+    /* rare, user-triggered event - a short blocking send is fine here */
+    HAL_UART_Transmit(&huart1, (uint8_t *)line, (uint16_t)len, 100);
+}
+
+/* --- Incoming link from ESP32 (TIME:/STATUS: lines) ---------------------
+   USART1's NVIC interrupt wasn't enabled when USART1 was generated via
+   CubeMX, so RX is polled from the main loop instead of interrupt-driven -
+   same non-blocking style as everything else here. */
+
+static char esp32_status[32] = "";
+
+static void esp32_handle_line(const char *line)
+{
+    if (strncmp(line, "TIME:", 5) == 0)
+    {
+        int year, month, day, h, m, s;
+
+        if (sscanf(line + 5, "%d-%d-%dT%d:%d:%d", &year, &month, &day, &h, &m, &s) == 6)
+        {
+            /* Sync the RTC once, right after boot - DS3231 has its own
+               crystal and battery backup, it doesn't need per-second
+               correction, just an initial anchor to real time. */
+            static uint8_t rtc_synced = 0;
+
+            if (!rtc_synced)
+            {
+                Time t = { .hours = (uint8_t)h, .minutes = (uint8_t)m, .seconds = (uint8_t)s };
+                Date d = { .day = (uint8_t)day, .month = (uint8_t)month, .year = (uint8_t)(year % 100) };
+
+                ds3231_set_time(t, d);
+                rtc_synced = 1;
+            }
+        }
+    }
+    else if (strncmp(line, "STATUS:", 7) == 0)
+    {
+        /* e.g. "WIFI_OK,RADIO_PLAY" - kept for the WiFi submenu's Status
+           entry once that's wired up to actually display it. */
+        strncpy(esp32_status, line + 7, sizeof(esp32_status) - 1);
+        esp32_status[sizeof(esp32_status) - 1] = '\0';
+    }
+}
+
+static void esp32_uart_poll(void)
+{
+    static char rx_line[40];
+    static uint8_t rx_len = 0;
+
+    if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_RXNE))
+    {
+        uint8_t c = (uint8_t)(huart1.Instance->DR & 0xFF);
+
+        if (c == '\n')
+        {
+            rx_line[rx_len] = '\0';
+            esp32_handle_line(rx_line);
+            rx_len = 0;
+        }
+        else if (rx_len < sizeof(rx_line) - 1)
+        {
+            rx_line[rx_len++] = (char)c;
+        }
+        /* line too long - drop silently, rx_len stops growing until '\n' */
+    }
+}
+
 void gpio_init(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -155,6 +265,24 @@ void gpio_init(void)
     HAL_GPIO_Init(SR_OE_Port, &GPIO_InitStruct);
 
     HAL_GPIO_WritePin(SR_OE_Port, SR_OE_Pin, GPIO_PIN_SET); // OE_OFF start
+
+    /* Rotary encoder (EC11) on PB12/13/14. CLK/DT sit on TIM1's
+       complementary channels (CH1N/CH2N) on this package, not the primary
+       TI1/TI2 inputs that hardware Encoder Mode needs - so both edges are
+       decoded in software via EXTI instead. SW is a plain active-low
+       button (pressed = pulled to GND). */
+    GPIO_InitStruct.Pin   = ENC_CLK_Pin | ENC_DT_Pin;
+    GPIO_InitStruct.Mode  = GPIO_MODE_IT_RISING_FALLING;
+    GPIO_InitStruct.Pull  = GPIO_PULLUP;
+    HAL_GPIO_Init(ENC_GPIO_Port, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin  = ENC_SW_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    HAL_GPIO_Init(ENC_GPIO_Port, &GPIO_InitStruct);
+
+    HAL_NVIC_SetPriority(EXTI15_10_IRQn, 3, 0);
+    HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 }
 
 void shift16(uint16_t value)
@@ -200,6 +328,103 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     }
 }
 
+/* --- Rotary encoder (EC11), robust state-machine quadrature decode ------
+   Classic "full-step" design (Ben Buxton / Peter Dannegger table): unlike
+   a simple accumulate-to-4 counter, this only registers a step once the
+   encoder has passed through the FULL valid transition sequence and
+   settled back into a rest state. Contact bounce or a reversal mid-click
+   just resets to "waiting" instead of corrupting a running sum - far more
+   resistant to a noisy/unfiltered signal than a plain accumulator. */
+
+#define ENC_DIR_CW  0x10
+#define ENC_DIR_CCW 0x20
+
+#define ENC_R_START     0x0
+#define ENC_R_CW_FINAL  0x1
+#define ENC_R_CW_BEGIN  0x2
+#define ENC_R_CW_NEXT   0x3
+#define ENC_R_CCW_BEGIN 0x4
+#define ENC_R_CCW_FINAL 0x5
+#define ENC_R_CCW_NEXT  0x6
+
+/* rows = current state (masked to 3 bits), columns = (A<<1)|B */
+static const uint8_t encoder_ttable[7][4] =
+{
+    { ENC_R_START,    ENC_R_CW_BEGIN,  ENC_R_CCW_BEGIN, ENC_R_START },
+    { ENC_R_CW_NEXT,  ENC_R_START,     ENC_R_CW_FINAL,  ENC_R_START | ENC_DIR_CW },
+    { ENC_R_CW_NEXT,  ENC_R_CW_BEGIN,  ENC_R_START,     ENC_R_START },
+    { ENC_R_CW_NEXT,  ENC_R_CW_BEGIN,  ENC_R_CW_FINAL,  ENC_R_START },
+    { ENC_R_CCW_NEXT, ENC_R_START,     ENC_R_CCW_BEGIN, ENC_R_START },
+    { ENC_R_CCW_NEXT, ENC_R_CCW_FINAL, ENC_R_START,     ENC_R_START | ENC_DIR_CCW },
+    { ENC_R_CCW_NEXT, ENC_R_CCW_FINAL, ENC_R_CCW_BEGIN, ENC_R_START },
+};
+
+static volatile int32_t enc_position = 0;
+static volatile uint8_t enc_state    = ENC_R_START;
+static volatile uint8_t last_ab      = 0xFF; /* sentinel - forces first call through */
+static volatile uint32_t last_rotation_tick = 0;
+
+static volatile uint8_t  button_tapped    = 0;
+static volatile uint32_t last_button_tick = 0;
+
+static void encoder_update(void)
+{
+    uint8_t a  = HAL_GPIO_ReadPin(ENC_GPIO_Port, ENC_CLK_Pin);
+    uint8_t b  = HAL_GPIO_ReadPin(ENC_GPIO_Port, ENC_DT_Pin);
+    uint8_t ab = (a << 1) | b;
+
+    /* EXTI fired but the pins already read back as unchanged (a very
+       brief glitch) - nothing to decode, skip the table lookup. Also
+       skip the "electrically active" timestamp below for this case:
+       if it were updated unconditionally, a noisy/undebounced encoder
+       could keep re-arming the SW reject window in HAL_GPIO_EXTI_Callback
+       on phantom edges alone and permanently swallow every button tap. */
+    if (ab == last_ab) return;
+    last_ab = ab;
+
+    /* Marks "the encoder is electrically active right now" on every real
+       CLK/DT transition (including bounce, not just confirmed steps) -
+       crosstalk onto SW happens on these raw edges, not only on completed
+       clicks, so this needs to catch them all. The SW window below is kept
+       short (see HAL_GPIO_EXTI_Callback) so this doesn't eat a deliberate
+       tap that follows shortly after rotation. */
+    last_rotation_tick = HAL_GetTick();
+
+    enc_state = encoder_ttable[enc_state & 0x0F][ab];
+
+    uint8_t dir = enc_state & 0x30;
+    if (dir == ENC_DIR_CW)  enc_position++;
+    if (dir == ENC_DIR_CCW) enc_position--;
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    if (GPIO_Pin == ENC_CLK_Pin || GPIO_Pin == ENC_DT_Pin)
+    {
+        encoder_update();
+    }
+    else if (GPIO_Pin == ENC_SW_Pin)
+    {
+        uint32_t now = HAL_GetTick();
+
+        /* Reject SW edges that land right on top of CLK/DT activity -
+           almost certainly electrical crosstalk, not an intentional press.
+           Kept short on purpose: real crosstalk rides on the same raw
+           edge/bounce train (settles within a few ms), while a deliberate
+           "rotate then tap" gesture takes much longer than that for a
+           human to actually press - so a short window catches the former
+           without eating the latter. */
+        if (now - last_rotation_tick < 10) return;
+
+        /* debounce - ignore repeat presses within 200 ms of the last one */
+        if (now - last_button_tick >= 200)
+        {
+            last_button_tick = now;
+            button_tapped = 1;
+        }
+    }
+}
+
 
 /* USER CODE END 0 */
 
@@ -234,6 +459,7 @@ int main(void)
   MX_GPIO_Init();
   MX_TIM10_Init();
   MX_I2C1_Init();
+  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
 
 
@@ -257,6 +483,19 @@ int main(void)
   uint32_t sensor_tick = 0;
   uint8_t  sensor_step = 0;
 
+  char last_time[16] = "";
+
+  ui_mode_t ui_mode = UI_CLOCK;
+  int32_t   last_enc_position = enc_position;
+  int8_t    menu_index = 0;
+  int8_t    submenu_index = 0;
+  uint32_t  menu_last_activity = 0;
+  uint8_t   menu_needs_redraw = 0;
+
+  /* remembers the last entry picked in each submenu (e.g. which radio
+     station is currently playing), so reopening a submenu highlights the
+     current choice instead of always starting back at index 0 */
+  int8_t last_submenu_index[MENU_COUNT] = { 0 };
 
   //set itme / date
 //
@@ -272,6 +511,129 @@ int main(void)
   while (1)
   {
 
+	  esp32_uart_poll();
+
+	  /* --- Encoder / button -> UI state --------------------------------
+	     Runs every pass (not gated to any tick) so the menu feels
+	     responsive to rotation/tap, independent of the 200 ms RTC poll. */
+	  {
+	      int32_t pos_now   = enc_position;
+	      int32_t pos_delta = pos_now - last_enc_position;
+	      last_enc_position = pos_now;
+
+	      if (button_tapped)
+	      {
+	          button_tapped = 0;
+	          menu_last_activity = HAL_GetTick();
+
+	          if (ui_mode == UI_CLOCK)
+	          {
+	              ui_mode = UI_MENU;
+	              menu_index = 0;
+	              menu_needs_redraw = 1;
+	          }
+	          else if (ui_mode == UI_MENU)
+	          {
+	              /* enter the chosen top-level item's own list, highlighting
+	                 whatever was picked there last time */
+	              ui_mode = UI_SUBMENU;
+	              submenu_index = last_submenu_index[menu_index];
+	              menu_needs_redraw = 1;
+	          }
+	          else /* UI_SUBMENU: list entry picked - act, then straight back to clock */
+	          {
+	              uint8_t count;
+	              const char *const *labels = submenu_labels((menu_item_t)menu_index, &count);
+
+	              last_submenu_index[menu_index] = submenu_index;
+
+	              if ((menu_item_t)menu_index == MENU_RADIO)
+	              {
+	                  send_station_to_esp32((uint8_t)submenu_index);
+	              }
+	              /* MENU_ALARM / MENU_WIFI actions land here once their
+	                 real behaviour (time editor, status/reconnect, ...)
+	                 is decided. */
+
+	              ssd1306_Fill(Black);
+	              ssd1306_SetCursor(0, 24);
+	              ssd1306_WriteString((char *)labels[submenu_index], Font_11x18, White);
+	              ssd1306_SetCursor(0, 48);
+	              ssd1306_WriteString("selected", Font_7x10, White);
+	              ssd1306_UpdateScreen();
+	              HAL_Delay(600);
+
+	              ui_mode = UI_CLOCK;
+	              last_time[0] = '\0'; /* force a clock redraw on next tick */
+	          }
+	      }
+
+	      if (ui_mode == UI_MENU && pos_delta != 0)
+	      {
+	          int32_t idx = ((menu_index + pos_delta) % MENU_COUNT + MENU_COUNT) % MENU_COUNT;
+	          menu_index = (int8_t)idx;
+	          menu_needs_redraw = 1;
+	          menu_last_activity = HAL_GetTick();
+	      }
+
+	      if (ui_mode == UI_SUBMENU && pos_delta != 0)
+	      {
+	          uint8_t count;
+	          submenu_labels((menu_item_t)menu_index, &count);
+
+	          int32_t idx = ((submenu_index + pos_delta) % count + count) % count;
+	          submenu_index = (int8_t)idx;
+	          menu_needs_redraw = 1;
+	          menu_last_activity = HAL_GetTick();
+	      }
+
+	      /* auto-return to the clock after a few seconds of inactivity,
+	         from either menu level */
+	      if (ui_mode != UI_CLOCK && HAL_GetTick() - menu_last_activity >= 6000)
+	      {
+	          ui_mode = UI_CLOCK;
+	          last_time[0] = '\0';
+	      }
+
+	      if (ui_mode == UI_MENU && menu_needs_redraw)
+	      {
+	          menu_needs_redraw = 0;
+
+	          ssd1306_Fill(Black);
+	          for (uint8_t i = 0; i < MENU_COUNT; i++)
+	          {
+	              ssd1306_SetCursor(0, i * 20 + 4);
+	              ssd1306_WriteString((char *)(i == menu_index ? ">" : " "), Font_11x18, White);
+	              ssd1306_SetCursor(16, i * 20 + 4);
+	              ssd1306_WriteString((char *)menu_labels[i], Font_11x18, White);
+	          }
+	          ssd1306_UpdateScreen();
+	      }
+
+	      if (ui_mode == UI_SUBMENU && menu_needs_redraw)
+	      {
+	          menu_needs_redraw = 0;
+
+	          uint8_t count;
+	          const char *const *labels = submenu_labels((menu_item_t)menu_index, &count);
+
+	          ssd1306_Fill(Black);
+	          ssd1306_SetCursor(0, 0);
+	          ssd1306_WriteString((char *)menu_labels[menu_index], Font_7x10, White);
+
+	          /* one row per entry - fine up to 4 items in the remaining
+	             54 px; a longer list (e.g. more radio stations) would
+	             need scrolling, not needed yet */
+	          for (uint8_t i = 0; i < count && i < 4; i++)
+	          {
+	              ssd1306_SetCursor(0, 14 + i * 12);
+	              ssd1306_WriteString((char *)(i == submenu_index ? ">" : " "), Font_7x10, White);
+	              ssd1306_SetCursor(10, 14 + i * 12);
+	              ssd1306_WriteString((char *)labels[i], Font_7x10, White);
+	          }
+	          ssd1306_UpdateScreen();
+	      }
+	  }
 
 	  /* Sensors - heavy I2C work (AHT20 has a blocking HAL_Delay(80)).
 	     Spread bmp280/aht20/bh1750 across three separate ticks instead of
@@ -315,14 +677,15 @@ int main(void)
 				digits[3] = t.minutes % 10;
 				colon_on = 1;
 
-				static char last_time[16] = "";
 				char time_str[16];
 				char date_str[16];
 
 				sprintf(time_str, "%02d:%02d:%02d", t.hours, t.minutes,
 						t.seconds);
 
-				if (strcmp(time_str, last_time) != 0) {
+				/* Skip the OLED redraw while the menu is on screen - the
+				   LED digits above still update every tick regardless. */
+				if (ui_mode == UI_CLOCK && strcmp(time_str, last_time) != 0) {
 					strcpy(last_time, time_str);
 
 					sprintf(date_str, "%02d.%02d.20%02d", d.day, d.month,
