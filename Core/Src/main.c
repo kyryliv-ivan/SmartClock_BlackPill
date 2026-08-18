@@ -32,6 +32,7 @@
 #include <string.h>
 #include "aht20.h"
 #include "bmp280.h"
+#include "bh1750.h"
 
 /* USER CODE END Includes */
 
@@ -245,11 +246,13 @@ int main(void)
 
   bmp280_init();
   aht20_init();
+  bh1750_init();
 
   float bmpTemp = 0.0f;
   float pressure = 0.0f;
   float ahtTemp = 0.0f;
   float humidity = 0.0f;
+  float lux = 0.0f;
 
   uint32_t sensor_tick = 0;
   uint8_t  sensor_step = 0;
@@ -271,8 +274,9 @@ int main(void)
 
 
 	  /* Sensors - heavy I2C work (AHT20 has a blocking HAL_Delay(80)).
-	     Spread bmp280/aht20 across two separate ticks instead of
-	     doing both back-to-back in one block every second. */
+	     Spread bmp280/aht20/bh1750 across three separate ticks instead of
+	     doing them back-to-back in one block every second. BH1750 is in
+	     continuous mode, so its read is just a 2-byte fetch - no delay. */
 	  if (HAL_GetTick() - sensor_tick >= 700)
 	  {
 	      sensor_tick = HAL_GetTick();
@@ -286,9 +290,13 @@ int main(void)
 	          case 1:
 	              aht20_read(&ahtTemp, &humidity);
 	              break;
+
+	          case 2:
+	              bh1750_read(&lux);
+	              break;
 	      }
 
-	      sensor_step = (sensor_step + 1) % 2;
+	      sensor_step = (sensor_step + 1) % 3;
 	  }
 
 	  static uint32_t last_read = 0;
@@ -334,7 +342,7 @@ int main(void)
 					ssd1306_SetCursor(0, 38);
 					ssd1306_WriteString(sensor_str, Font_7x10, White);
 
-					sprintf(sensor_str, "P:%.1f hPa", pressure);
+					sprintf(sensor_str, "P:%.0f L:%.0flx", pressure, lux);
 					ssd1306_SetCursor(0, 52);
 					ssd1306_WriteString(sensor_str, Font_7x10, White);
 
