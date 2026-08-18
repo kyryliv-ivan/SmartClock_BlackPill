@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "adc.h"
 #include "i2c.h"
 #include "tim.h"
 #include "usart.h"
@@ -175,6 +176,60 @@ static const char *const *submenu_labels(menu_item_t item, uint8_t *count)
         case MENU_WIFI:  *count = WIFI_COUNT;  return wifi_labels;
         default:         *count = 0;           return NULL;
     }
+}
+
+/* --- Battery level (PA5 / ADC1_IN5) --------------------------------------
+   R1/R2 100k/100k divider off the raw battery net (B+/B-, tapped before
+   the LX-2's boost converter) halves Vbat into ADC range, C1 100nF buffers
+   the divider's high source impedance for the sample. Voltage->percent
+   isn't linear for Li-ion, so it's a piecewise-linear fit over a measured
+   discharge curve instead of a straight scale.
+
+   BATTERY_CAL_SCALE corrects for real-board error the raw formula can't
+   know about (R1/R2 tolerance, actual Vref vs the assumed 3.3V) - measured
+   once against a multimeter: board read 3.20V computed while the pack was
+   actually at 3.57V, so scale = 3.57 / 3.20. Re-measure and update this if
+   R1/R2 ever get swapped for a different pair. */
+#define BATTERY_CAL_SCALE 1.115f
+
+static uint8_t battery_read_percent(void)
+{
+    static const struct { float v; uint8_t pct; } curve[] = {
+        { 4.20f, 100 }, { 4.10f, 90 }, { 4.00f, 80 }, { 3.90f, 70 },
+        { 3.80f, 60 },  { 3.70f, 45 }, { 3.60f, 25 }, { 3.50f, 15 },
+        { 3.30f, 5 },   { 3.20f, 0 },
+    };
+    const int n = sizeof(curve) / sizeof(curve[0]);
+
+    /* Average 16 samples instead of trusting a single conversion - the
+       divider's high source impedance makes one-shot readings noisy enough
+       to visibly jitter the displayed percent by a couple of points. */
+    uint32_t sum = 0;
+    for (int i = 0; i < 16; i++)
+    {
+        HAL_ADC_Start(&hadc1);
+        HAL_StatusTypeDef status = HAL_ADC_PollForConversion(&hadc1, 10);
+        sum += (status == HAL_OK) ? HAL_ADC_GetValue(&hadc1) : 0;
+        HAL_ADC_Stop(&hadc1);
+    }
+    uint32_t raw = sum / 16;
+
+    float v_bat = (raw / 4095.0f) * 3.3f * 2.0f * BATTERY_CAL_SCALE;
+
+    if (v_bat >= curve[0].v)   return curve[0].pct;
+    if (v_bat <= curve[n-1].v) return curve[n-1].pct;
+
+    for (int i = 0; i < n - 1; i++)
+    {
+        if (v_bat <= curve[i].v && v_bat >= curve[i + 1].v)
+        {
+            float span_v = curve[i].v - curve[i + 1].v;
+            float span_p = (float)curve[i].pct - (float)curve[i + 1].pct;
+            float frac   = (v_bat - curve[i + 1].v) / span_v;
+            return (uint8_t)(curve[i + 1].pct + frac * span_p);
+        }
+    }
+    return 0;
 }
 
 static void send_station_to_esp32(uint8_t index)
@@ -460,6 +515,7 @@ int main(void)
   MX_TIM10_Init();
   MX_I2C1_Init();
   MX_USART1_UART_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
 
 
@@ -482,6 +538,15 @@ int main(void)
 
   uint32_t sensor_tick = 0;
   uint8_t  sensor_step = 0;
+
+  /* slow-changing, so it's read on its own multi-second tick rather than
+     every clock redraw. battery_pct_f is a smoothed (EMA) running value -
+     the 16x-averaged reading from battery_read_percent() still moves a
+     point or two between updates, so this blends each new reading in
+     gradually instead of snapping the displayed number straight to it. */
+  uint32_t battery_tick = 0;
+  float    battery_pct_f = (float)battery_read_percent();
+  uint8_t  battery_pct   = (uint8_t)(battery_pct_f + 0.5f);
 
   char last_time[16] = "";
 
@@ -661,6 +726,13 @@ int main(void)
 	      sensor_step = (sensor_step + 1) % 3;
 	  }
 
+	  if (HAL_GetTick() - battery_tick >= 5000)
+	  {
+	      battery_tick = HAL_GetTick();
+	      battery_pct_f = battery_pct_f * 0.7f + (float)battery_read_percent() * 0.3f;
+	      battery_pct   = (uint8_t)(battery_pct_f + 0.5f);
+	  }
+
 	  static uint32_t last_read = 0;
 
 	  if (HAL_GetTick() - last_read >= 200)
@@ -695,6 +767,15 @@ int main(void)
 
 					ssd1306_SetCursor(0, 0);
 					ssd1306_WriteString(time_str, Font_11x18, White);
+
+					/* "23:45:12" at 11px/char leaves 40px free on the right
+					   (128 - 8*11); "100%" at 7px/char is 28px - fits without
+					   having to shrink the time font. Fixed-width "%3d%%" so
+					   it doesn't shift around as the digit count changes. */
+					char batt_str[8];
+					sprintf(batt_str, "%3d%%", battery_pct);
+					ssd1306_SetCursor(100, 4);
+					ssd1306_WriteString(batt_str, Font_7x10, White);
 
 					ssd1306_SetCursor(0, 24);
 					ssd1306_WriteString(date_str, Font_7x10, White);
