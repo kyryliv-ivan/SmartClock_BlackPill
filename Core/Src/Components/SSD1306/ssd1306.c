@@ -177,11 +177,13 @@ void ssd1306_Fill(SSD1306_COLOR color) {
     memset(SSD1306_Buffer, (color == Black) ? 0x00 : 0xFF, sizeof(SSD1306_Buffer));
 }
 
-/* Оновити лише одну сторінку (0..SSD1306_HEIGHT/8-1) з буфера. Дозволяє
-   розтягнути повне оновлення екрана по кількох проходах головного циклу
-   замість одного суцільного блоку з ~32 I2C-транзакцій - TIM6 встигає
-   відпрацювати мультиплексування між сторінками, а не лише між байтами
-   всередині однієї великої пачки. */
+/* Update just one page (0..SSD1306_HEIGHT/8-1) from the buffer. Lets the
+   full screen update be spread across several main-loop passes instead
+   of one solid block of ~32 I2C transactions - useful if some other
+   time-critical task (e.g. an interrupt-free multiplex loop) needs to
+   run between pages rather than only between bytes inside one big burst.
+   Not currently used in this project (the LED multiplex runs on TIM10
+   IT, independent of the main loop), kept for reference. */
 void ssd1306_UpdateScreenPage(uint8_t page) {
     if (page >= SSD1306_HEIGHT/8)
         return;

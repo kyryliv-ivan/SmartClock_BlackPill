@@ -30,6 +30,8 @@
 #include "ssd1306_fonts.h"
 #include <stdio.h>
 #include <string.h>
+#include "aht20.h"
+#include "bmp280.h"
 
 /* USER CODE END Includes */
 
@@ -241,10 +243,23 @@ int main(void)
   ssd1306_Fill(Black);
   ssd1306_UpdateScreen();
 
+  bmp280_init();
+  aht20_init();
 
-  Time t = { .hours = 07, .minutes = 50, .seconds = 0 };
-  Date d = { .day = 16, .month = 8, .year = 26 };
-  // ds3231_set_time(t, d); //set TIME
+  float bmpTemp = 0.0f;
+  float pressure = 0.0f;
+  float ahtTemp = 0.0f;
+  float humidity = 0.0f;
+
+  uint32_t sensor_tick = 0;
+  uint8_t  sensor_step = 0;
+
+
+  //set itme / date
+//
+//   Time t = { .hours = 11, .minutes = 25, .seconds = 0 };
+//   Date d = { .day = 18, .month = 8, .year = 26 };
+//   ds3231_set_time(t, d);
 
 
   /* USER CODE END 2 */
@@ -254,6 +269,27 @@ int main(void)
   while (1)
   {
 
+
+	  /* Sensors - heavy I2C work (AHT20 has a blocking HAL_Delay(80)).
+	     Spread bmp280/aht20 across two separate ticks instead of
+	     doing both back-to-back in one block every second. */
+	  if (HAL_GetTick() - sensor_tick >= 700)
+	  {
+	      sensor_tick = HAL_GetTick();
+
+	      switch (sensor_step)
+	      {
+	          case 0:
+	              bmp280_read(&bmpTemp, &pressure);
+	              break;
+
+	          case 1:
+	              aht20_read(&ahtTemp, &humidity);
+	              break;
+	      }
+
+	      sensor_step = (sensor_step + 1) % 2;
+	  }
 
 	  static uint32_t last_read = 0;
 
@@ -291,6 +327,16 @@ int main(void)
 
 					ssd1306_SetCursor(0, 24);
 					ssd1306_WriteString(date_str, Font_7x10, White);
+
+					char sensor_str[16];
+
+					sprintf(sensor_str, "T:%.1fC H:%.0f%%", ahtTemp, humidity);
+					ssd1306_SetCursor(0, 38);
+					ssd1306_WriteString(sensor_str, Font_7x10, White);
+
+					sprintf(sensor_str, "P:%.1f hPa", pressure);
+					ssd1306_SetCursor(0, 52);
+					ssd1306_WriteString(sensor_str, Font_7x10, White);
 
 					ssd1306_UpdateScreen();
 				}
