@@ -27,14 +27,12 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
-
+#include "sensors.h"
 #include "ssd1306.h"
 #include "ssd1306_fonts.h"
 #include <stdio.h>
 #include <string.h>
-#include "aht20.h"
-#include "bmp280.h"
-#include "bh1750.h"
+
 
 /* USER CODE END Includes */
 
@@ -526,18 +524,7 @@ int main(void)
   ssd1306_Fill(Black);
   ssd1306_UpdateScreen();
 
-  bmp280_init();
-  aht20_init();
-  bh1750_init();
-
-  float bmpTemp = 0.0f;
-  float pressure = 0.0f;
-  float ahtTemp = 0.0f;
-  float humidity = 0.0f;
-  float lux = 0.0f;
-
-  uint32_t sensor_tick = 0;
-  uint8_t  sensor_step = 0;
+  sensors_init();
 
   /* slow-changing, so it's read on its own multi-second tick rather than
      every clock redraw. battery_pct_f is a smoothed (EMA) running value -
@@ -704,27 +691,8 @@ int main(void)
 	     Spread bmp280/aht20/bh1750 across three separate ticks instead of
 	     doing them back-to-back in one block every second. BH1750 is in
 	     continuous mode, so its read is just a 2-byte fetch - no delay. */
-	  if (HAL_GetTick() - sensor_tick >= 700)
-	  {
-	      sensor_tick = HAL_GetTick();
 
-	      switch (sensor_step)
-	      {
-	          case 0:
-	              bmp280_read(&bmpTemp, &pressure);
-	              break;
-
-	          case 1:
-	              aht20_read(&ahtTemp, &humidity);
-	              break;
-
-	          case 2:
-	              bh1750_read(&lux);
-	              break;
-	      }
-
-	      sensor_step = (sensor_step + 1) % 3;
-	  }
+	  sensors_poll();
 
 	  if (HAL_GetTick() - battery_tick >= 5000)
 	  {
@@ -782,11 +750,11 @@ int main(void)
 
 					char sensor_str[16];
 
-					sprintf(sensor_str, "T:%.1fC H:%.0f%%", ahtTemp, humidity);
+					sprintf(sensor_str, "T:%.1fC H:%.0f%%", temperature_get(), humidity_get());
 					ssd1306_SetCursor(0, 38);
 					ssd1306_WriteString(sensor_str, Font_7x10, White);
 
-					sprintf(sensor_str, "P:%.0f L:%.0flx", pressure, lux);
+					sprintf(sensor_str, "P:%.0f L:%.0flx", pressure_get(), lux_get());
 					ssd1306_SetCursor(0, 52);
 					ssd1306_WriteString(sensor_str, Font_7x10, White);
 
