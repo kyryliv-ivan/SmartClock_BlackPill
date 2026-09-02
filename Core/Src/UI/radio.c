@@ -12,7 +12,7 @@
 static const char *labels[] = {
 	"Stop",
 	"Hit FM", "Radio ROKS", "Zakarpattya FM", "Kiss FM", "Radio Relax",
-	"Melodia FM", "Nashe Radio", "Ukr Radio 1", "Ukr Radio 2", "Avtoradio",
+	"Nashe Radio", "Ukr Radio 1", "Ukr Radio 2", "Avtoradio",
 	"Hromadske", "Ukr Radio 3", "Ukr Radio 4", "Kiss FM Ukr",
 	"Kiss Digital", "ROKS Ukr", "ROKS New Rock", "Relax Instr",
 	"Hit FM Ukr", "Hit FM Top", "Melodia Romantic", "Bayraktar",

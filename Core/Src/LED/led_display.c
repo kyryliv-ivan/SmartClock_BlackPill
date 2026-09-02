@@ -12,22 +12,39 @@
 /* digit slots hold 0-9 for real digits, or one of these symbolic glyphs -
    all indices into the same segment_map[] table below */
 typedef enum {
-	SEG_BLANK = 10, SEG_DASH, SEG_DEGREE, SEG_C, SEG_H, SEG_P, SEG_COUNT
+	SEG_BLANK = 10, SEG_DASH, SEG_DEGREE, SEG_C, SEG_H, SEG_P,
+	SEG_BAR1, SEG_BAR2, SEG_BAR3, SEG_BAR4,
+	SEG_COUNT
 } seg_glyph_t;
 
 static volatile uint8_t digits[4] = { 0 };
 static volatile uint8_t colon_on = 1;
 static volatile uint8_t mux_index = 0;
 
+/* bar levels climb the digit's outline bottom-to-top, skipping G (middle) -
+   it's horizontal and doesn't read as "height" the way A/D do */
 static const uint8_t segment_map[SEG_COUNT] = {
 	0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F, /* 0-9 */
-	0x00, /* SEG_BLANK  -> off */
+	0x00, /* SEG_BLANK  -> off (also bar level 0) */
 	0x40, /* SEG_DASH   -> "-" */
 	0x63, /* SEG_DEGREE -> "°" */
 	0x39, /* SEG_C      -> "C" */
 	0x76, /* SEG_H      -> "H" */
 	0x73, /* SEG_P      -> "P" */
+	0x08, /* SEG_BAR1   -> D           (lowest) */
+	0x1C, /* SEG_BAR2   -> D+E+C */
+	0x3E, /* SEG_BAR3   -> D+E+C+F+B */
+	0x3F, /* SEG_BAR4   -> D+E+C+F+B+A (highest, full outline) */
 };
+
+static uint8_t bar_glyph(uint8_t level)
+{
+	if (level >= 4) return SEG_BAR4;
+	if (level == 3) return SEG_BAR3;
+	if (level == 2) return SEG_BAR2;
+	if (level == 1) return SEG_BAR1;
+	return SEG_BLANK;
+}
 
 static void shift16(uint16_t value)
 {
@@ -132,6 +149,15 @@ void led_display_set_pressure(uint16_t hpa)
 	digits[1] = (p3 / 10) % 10;
 	digits[2] = p3 % 10;
 	digits[3] = SEG_P;
+	colon_on = 0;
+}
+
+void led_display_set_eq(uint8_t l0, uint8_t l1, uint8_t l2, uint8_t l3)
+{
+	digits[0] = bar_glyph(l0);
+	digits[1] = bar_glyph(l1);
+	digits[2] = bar_glyph(l2);
+	digits[3] = bar_glyph(l3);
 	colon_on = 0;
 }
 

@@ -170,3 +170,17 @@ uint8_t encoder_tapped_get(void)
 {
 	return ec11_button_tapped();
 }
+
+static uint8_t eq_levels[4] = { 0 };
+
+void eq_level_set(uint8_t index, uint8_t level)
+{
+	if (index >= 4) return;
+	eq_levels[index] = level;
+}
+
+uint8_t eq_level_get(uint8_t index)
+{
+	if (index >= 4) return 0;
+	return eq_levels[index];
+}

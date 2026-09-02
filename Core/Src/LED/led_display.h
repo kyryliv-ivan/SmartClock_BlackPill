@@ -19,6 +19,7 @@ void led_display_set_error(void);
 void led_display_set_temp(int8_t temp_c);
 void led_display_set_humidity(uint8_t rh_percent);
 void led_display_set_pressure(uint16_t hpa);
+void led_display_set_eq(uint8_t l0, uint8_t l1, uint8_t l2, uint8_t l3);
 
 
 #endif /* SRC_LED_LED_DISPLAY_H_ */

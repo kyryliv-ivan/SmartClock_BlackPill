@@ -33,4 +33,8 @@ HAL_StatusTypeDef time_set(uint8_t hours, uint8_t minutes, uint8_t day,
 int32_t encoder_delta_get(void);
 uint8_t encoder_tapped_get(void);
 
+/* equalizer levels (0-3 each) received from the ESP32 over UART */
+void    eq_level_set(uint8_t index, uint8_t level);
+uint8_t eq_level_get(uint8_t index);
+
 #endif /* SRC_SENSORS_SENSORS_H_ */

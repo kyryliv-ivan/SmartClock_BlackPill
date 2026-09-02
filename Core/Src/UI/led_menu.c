@@ -6,11 +6,11 @@
 
 typedef enum {
 	LED_MODE_TIME, LED_MODE_SECONDS, LED_MODE_DATE,
-	LED_MODE_TEMP, LED_MODE_HUMIDITY, LED_MODE_PRESSURE, LED_MODE_COUNT
+	LED_MODE_TEMP, LED_MODE_HUMIDITY, LED_MODE_PRESSURE, LED_MODE_EQ, LED_MODE_COUNT
 } led_mode_t;
 
 static const char *mode_labels[LED_MODE_COUNT] =
-	{ "Time", "Seconds", "Date", "Temp", "Humidity", "Pressure" };
+	{ "Time", "Seconds", "Date", "Temp", "Humidity", "Pressure", "Equalizer" };
 
 static const uint8_t interval_options[] =
 	{ 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60 };
@@ -73,6 +73,10 @@ void led_menu_tick(void)
 		break;
 	case LED_MODE_PRESSURE:
 		led_display_set_pressure((uint16_t) pressure_get());
+		break;
+	case LED_MODE_EQ:
+		led_display_set_eq(eq_level_get(0), eq_level_get(1), eq_level_get(2),
+				eq_level_get(3));
 		break;
 	default:
 		break;

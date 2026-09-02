@@ -1,6 +1,7 @@
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <time.h>
+#include <math.h>
 #include "Audio_nopsram.h"
 
 #define I2S_BCLK  10
@@ -18,6 +19,8 @@
 //   ESP32 -> STM32:
 //     TIME:2026-08-18T12:34:56
 //     STATUS:WIFI_OK,RADIO_PLAY   (or WIFI_DOWN / RADIO_BUFFERING / RADIO_STOP)
+//     EQ:<l0>,<l1>,<l2>,<l3>       (0-4 each: bass, low-mid, high-mid,
+//                                   treble peak-hold - see eqSendIfDue())
 //   STM32 -> ESP32:
 //     STATION:<index>             (index into the `stations[]` table below -
 //                                   sent when the user picks a station in the
@@ -51,7 +54,6 @@ const RadioStation stations[] = {
   { "Zakarpattya FM",   "http://195.234.148.51:8000/" },
   { "Kiss FM",          "http://online.kissfm.ua/KissFM" },
   { "Radio Relax",      "http://online.radiorelax.ua/RadioRelax" },
-  { "Melodia FM",       "https://online.melodiafm.ua/MelodiaFM" },
   { "Nashe Radio",      "https://online.nasheradio.ua/NasheRadio" },
   { "Ukr Radio 1",      "https://radio.ukr.radio/ur1-mp3" },
   { "Ukr Radio 2",      "https://radio.ukr.radio/ur2-mp3" },
@@ -201,6 +203,83 @@ void sendStatusToStm32() {
   stm32Serial.print(line);
 }
 
+// --- Equalizer bands, computed from real decoded PCM samples --------------
+// audio_process_extern() is a weak hook in Audio_nopsram.h, called by
+// sendBytes() with the just-decoded interleaved L/R buffer right before
+// each frame is played - real audio-reactive data, not just isRunning().
+// No registration call needed: defining it here overrides the weak default.
+//
+// 4-band split via cascaded one-pole low-pass filters ("poor man's FFT") -
+// cheap enough to run per-sample without risking audio dropouts, unlike a
+// real FFT would be on a chip already busy decoding + WiFi + I2S:
+//   band0 bass     ( <200 Hz)  = |lp1|
+//   band1 low-mid  (200Hz-1kHz)= |lp2 - lp1|
+//   band2 high-mid (1-4 kHz)   = |lp3 - lp2|
+//   band3 treble   ( >4 kHz)   = |mono - lp3|
+static float   lp1 = 0, lp2 = 0, lp3 = 0;   // filter states, persist across calls
+static uint8_t bandPeak[4] = { 0, 0, 0, 0 }; // slow-decaying peak hold per band
+
+void audio_process_extern(int16_t* buff, uint16_t len, bool *continueI2S) {
+  *continueI2S = true; // must stay true, or audio playback stops
+  if (len == 0) return;
+
+  const float a1 = 0.03f; // ~200 Hz cutoff  (assumes ~44.1kHz stream)
+  const float a2 = 0.13f; // ~1 kHz cutoff
+  const float a3 = 0.43f; // ~4 kHz cutoff
+
+  int32_t bandMax[4] = { 0, 0, 0, 0 };
+
+  for (uint16_t i = 0; i < len; i++) {
+    float mono = (buff[i * 2] + buff[i * 2 + 1]) * 0.5f;
+
+    lp1 += a1 * (mono - lp1);
+    lp2 += a2 * (mono - lp2);
+    lp3 += a3 * (mono - lp3);
+
+    // lowMid/hiMid/treble are *differences* of two low-passes, so they're
+    // naturally quieter than the bass band even on loud material - boost
+    // them here so all 4 bars have a comparable chance of reaching the top.
+    int32_t bass   = (int32_t) (fabsf(lp1)        * 1.0f);
+    int32_t lowMid = (int32_t) (fabsf(lp2 - lp1)  * 1.6f);
+    int32_t hiMid  = (int32_t) (fabsf(lp3 - lp2)  * 2.5f);
+    int32_t treble = (int32_t) (fabsf(mono - lp3) * 4.0f);
+
+    if (bass   > bandMax[0]) bandMax[0] = bass;
+    if (lowMid > bandMax[1]) bandMax[1] = lowMid;
+    if (hiMid  > bandMax[2]) bandMax[2] = hiMid;
+    if (treble > bandMax[3]) bandMax[3] = treble;
+  }
+
+  for (uint8_t b = 0; b < 4; b++) {
+    // lower divisor than a plain int16-range split - most music never
+    // hits the true full-scale sample value, so level 4 needs to be
+    // reachable well below that to ever actually show up
+    uint8_t inst = min(4, (int)(bandMax[b] / 5000)); // -> 0..4
+    if (inst > bandPeak[b]) bandPeak[b] = inst;
+  }
+}
+
+// call from loop() - sends "EQ:<bass>,<lowMid>,<hiMid>,<treble>\n" to STM32
+void eqSendIfDue() {
+  static uint32_t lastDecay = 0;
+  static uint32_t lastSend  = 0;
+
+  if (millis() - lastDecay > 200) { // peak-hold bars fall slowly
+    lastDecay = millis();
+    for (uint8_t b = 0; b < 4; b++) {
+      if (bandPeak[b] > 0) bandPeak[b]--;
+    }
+  }
+
+  if (millis() - lastSend < 100) return; // throttle UART traffic
+  lastSend = millis();
+
+  char line[24];
+  snprintf(line, sizeof(line), "EQ:%u,%u,%u,%u\n",
+           bandPeak[0], bandPeak[1], bandPeak[2], bandPeak[3]);
+  stm32Serial.print(line);
+}
+
 // index 255 is a reserved "stop playback" sentinel sent by the STM32 side
 // (radio.c's "Stop" list entry), not a real station index.
 void playStation(uint8_t index) {
@@ -299,6 +378,8 @@ void loop() {
   if (g_wifiReady) {
     audio.loop();
   }
+
+  eqSendIfDue();
 
   handleStm32Rx();
 

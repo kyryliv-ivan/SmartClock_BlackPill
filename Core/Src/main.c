@@ -159,6 +159,17 @@ static void esp32_handle_line(const char *line)
 		 entry once that's wired up to actually display it. */
 		strncpy(esp32_status, line + 7, sizeof(esp32_status) - 1);
 		esp32_status[sizeof(esp32_status) - 1] = '\0';
+	} else if (strncmp(line, "EQ:", 3) == 0)
+	{
+		int l0, l1, l2, l3;
+
+		if (sscanf(line + 3, "%d,%d,%d,%d", &l0, &l1, &l2, &l3) == 4)
+		{
+			eq_level_set(0, (uint8_t) l0);
+			eq_level_set(1, (uint8_t) l1);
+			eq_level_set(2, (uint8_t) l2);
+			eq_level_set(3, (uint8_t) l3);
+		}
 	}
 }
 
