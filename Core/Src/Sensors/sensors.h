@@ -30,4 +30,7 @@ uint8_t rtc_ok_get(void);
 HAL_StatusTypeDef time_set(uint8_t hours, uint8_t minutes, uint8_t day,
 		uint8_t month, uint8_t year);
 
+int32_t encoder_delta_get(void);
+uint8_t encoder_tapped_get(void);
+
 #endif /* SRC_SENSORS_SENSORS_H_ */

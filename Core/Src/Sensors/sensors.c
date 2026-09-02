@@ -11,6 +11,7 @@
 #include "bmp280.h"
 #include "aht20.h"
 #include "bh1750.h"
+#include "ec11.h"
 #include <string.h>
 
 #define SENSOR_POLL_INTERVAL_MS 700
@@ -40,6 +41,7 @@ void sensors_init(void)
 	bmp280_init();
 	aht20_init();
 	bh1750_init();
+	ec11_init();
 }
 
 void sensors_poll(void)
@@ -157,4 +159,14 @@ HAL_StatusTypeDef time_set(uint8_t hours, uint8_t minutes,
 		rtc_last_good = HAL_GetTick();
 	}
 	return status;
+}
+
+int32_t encoder_delta_get(void)
+{
+	return ec11_get_delta();
+}
+
+uint8_t encoder_tapped_get(void)
+{
+	return ec11_button_tapped();
 }

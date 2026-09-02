@@ -253,134 +253,7 @@ static void esp32_uart_poll(void)
 
 void gpio_init(void)
 {
-
-	GPIO_InitTypeDef GPIO_InitStruct = { 0 };
-
 	led_display_init();
-
-	/* Rotary encoder (EC11) on PB12/13/14. CLK/DT sit on TIM1's
-	 complementary channels (CH1N/CH2N) on this package, not the primary
-	 TI1/TI2 inputs that hardware Encoder Mode needs - so both edges are
-	 decoded in software via EXTI instead. SW is a plain active-low
-	 button (pressed = pulled to GND). */
-	GPIO_InitStruct.Pin = ENC_CLK_Pin | ENC_DT_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
-	GPIO_InitStruct.Pull = GPIO_PULLUP;
-	HAL_GPIO_Init(ENC_GPIO_Port, &GPIO_InitStruct);
-
-	GPIO_InitStruct.Pin = ENC_SW_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
-	GPIO_InitStruct.Pull = GPIO_PULLUP;
-	HAL_GPIO_Init(ENC_GPIO_Port, &GPIO_InitStruct);
-
-	HAL_NVIC_SetPriority(EXTI15_10_IRQn, 3, 0);
-	HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
-}
-
-/* --- Rotary encoder (EC11), robust state-machine quadrature decode ------
- Classic "full-step" design (Ben Buxton / Peter Dannegger table): unlike
- a simple accumulate-to-4 counter, this only registers a step once the
- encoder has passed through the FULL valid transition sequence and
- settled back into a rest state. Contact bounce or a reversal mid-click
- just resets to "waiting" instead of corrupting a running sum - far more
- resistant to a noisy/unfiltered signal than a plain accumulator. */
-
-#define ENC_DIR_CW  0x10
-#define ENC_DIR_CCW 0x20
-
-#define ENC_R_START     0x0
-#define ENC_R_CW_FINAL  0x1
-#define ENC_R_CW_BEGIN  0x2
-#define ENC_R_CW_NEXT   0x3
-#define ENC_R_CCW_BEGIN 0x4
-#define ENC_R_CCW_FINAL 0x5
-#define ENC_R_CCW_NEXT  0x6
-
-/* rows = current state (masked to 3 bits), columns = (A<<1)|B */
-static const uint8_t encoder_ttable[7][4] = { { ENC_R_START, ENC_R_CW_BEGIN,
-ENC_R_CCW_BEGIN, ENC_R_START }, { ENC_R_CW_NEXT, ENC_R_START,
-ENC_R_CW_FINAL, ENC_R_START | ENC_DIR_CW }, { ENC_R_CW_NEXT,
-ENC_R_CW_BEGIN, ENC_R_START, ENC_R_START }, { ENC_R_CW_NEXT,
-ENC_R_CW_BEGIN, ENC_R_CW_FINAL, ENC_R_START }, { ENC_R_CCW_NEXT,
-ENC_R_START, ENC_R_CCW_BEGIN, ENC_R_START }, { ENC_R_CCW_NEXT,
-ENC_R_CCW_FINAL, ENC_R_START, ENC_R_START | ENC_DIR_CCW }, {
-ENC_R_CCW_NEXT, ENC_R_CCW_FINAL, ENC_R_CCW_BEGIN, ENC_R_START }, };
-
-static volatile int32_t enc_position = 0;
-static volatile uint8_t enc_state = ENC_R_START;
-static volatile uint8_t last_ab = 0xFF; /* sentinel - forces first call through */
-static volatile uint32_t last_rotation_tick = 0;
-
-static volatile uint8_t button_tapped = 0;
-static volatile uint32_t last_button_tick = 0;
-
-static void encoder_update(void)
-{
-	/* Ignore rotation while the button is physically held down - the push
-	   switch and the rotary contacts share one shaft on cheap EC11
-	   modules, so pressing (especially holding a bit longer) can wobble
-	   the shaft enough to register as an accidental extra step alongside
-	   the tap, making one press feel like two actions. */
-	if (HAL_GPIO_ReadPin(ENC_GPIO_Port, ENC_SW_Pin) == GPIO_PIN_RESET)
-		return;
-
-	uint8_t a = HAL_GPIO_ReadPin(ENC_GPIO_Port, ENC_CLK_Pin);
-	uint8_t b = HAL_GPIO_ReadPin(ENC_GPIO_Port, ENC_DT_Pin);
-	uint8_t ab = (a << 1) | b;
-
-	/* EXTI fired but the pins already read back as unchanged (a very
-	 brief glitch) - nothing to decode, skip the table lookup. Also
-	 skip the "electrically active" timestamp below for this case:
-	 if it were updated unconditionally, a noisy/undebounced encoder
-	 could keep re-arming the SW reject window in HAL_GPIO_EXTI_Callback
-	 on phantom edges alone and permanently swallow every button tap. */
-	if (ab == last_ab)
-		return;
-	last_ab = ab;
-
-	/* Marks "the encoder is electrically active right now" on every real
-	 CLK/DT transition (including bounce, not just confirmed steps) -
-	 crosstalk onto SW happens on these raw edges, not only on completed
-	 clicks, so this needs to catch them all. The SW window below is kept
-	 short (see HAL_GPIO_EXTI_Callback) so this doesn't eat a deliberate
-	 tap that follows shortly after rotation. */
-	last_rotation_tick = HAL_GetTick();
-
-	enc_state = encoder_ttable[enc_state & 0x0F][ab];
-
-	uint8_t dir = enc_state & 0x30;
-	if (dir == ENC_DIR_CW)
-		enc_position++;
-	if (dir == ENC_DIR_CCW)
-		enc_position--;
-}
-
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
-{
-	if (GPIO_Pin == ENC_CLK_Pin || GPIO_Pin == ENC_DT_Pin)
-	{
-		encoder_update();
-	} else if (GPIO_Pin == ENC_SW_Pin)
-	{
-		uint32_t now = HAL_GetTick();
-
-		/* Reject SW edges that land right on top of CLK/DT activity -
-		 almost certainly electrical crosstalk, not an intentional press.
-		 Kept short on purpose: real crosstalk rides on the same raw
-		 edge/bounce train (settles within a few ms), while a deliberate
-		 "rotate then tap" gesture takes much longer than that for a
-		 human to actually press - so a short window catches the former
-		 without eating the latter. */
-		if (now - last_rotation_tick < 10)
-			return;
-
-		/* debounce - ignore repeat presses within 200 ms of the last one */
-		if (now - last_button_tick >= 200)
-		{
-			last_button_tick = now;
-			button_tapped = 1;
-		}
-	}
 }
 
 /* USER CODE END 0 */
@@ -440,7 +313,6 @@ int main(void)
 
 	ui_mode_t ui_mode = UI_CLOCK;
 	TimeEditor_t time_ed;
-	int32_t last_enc_position = enc_position;
 	int8_t menu_index = 0;
 	int8_t submenu_index = 0;
 	uint32_t menu_last_activity = 0;
@@ -468,13 +340,10 @@ int main(void)
 		 Runs every pass (not gated to any tick) so the menu feels
 		 responsive to rotation/tap, independent of the 200 ms RTC poll. */
 		{
-			int32_t pos_now = enc_position;
-			int32_t pos_delta = pos_now - last_enc_position;
-			last_enc_position = pos_now;
+			int32_t pos_delta = encoder_delta_get();
 
-			if (button_tapped)
+			if (encoder_tapped_get())
 			{
-				button_tapped = 0;
 				menu_last_activity = HAL_GetTick();
 
 				if (ui_mode == UI_CLOCK)
