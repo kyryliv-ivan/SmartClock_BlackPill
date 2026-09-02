@@ -66,20 +66,14 @@ void led_menu_tick(void)
 		led_display_set_colon(0);
 		break;
 	case LED_MODE_TEMP:
-		led_display_set_time((uint8_t) temperature_get(), 0);
-		led_display_set_colon(0);
+		led_display_set_temp((int8_t) temperature_get());
 		break;
 	case LED_MODE_HUMIDITY:
-		led_display_set_time((uint8_t) humidity_get(), 0);
-		led_display_set_colon(0);
+		led_display_set_humidity((uint8_t) humidity_get());
 		break;
 	case LED_MODE_PRESSURE:
-	{
-		uint16_t p = (uint16_t) pressure_get();
-		led_display_set_time((uint8_t) (p / 100), (uint8_t) (p % 100));
-		led_display_set_colon(0);
+		led_display_set_pressure((uint16_t) pressure_get());
 		break;
-	}
 	default:
 		break;
 	}
@@ -95,6 +89,21 @@ void led_select_rotate(int32_t delta)
 void led_select_toggle(void)
 {
 	mode_enabled[cursor] = !mode_enabled[cursor];
+
+	/* never allow every mode to end up off - fall back to Time so the LED
+	   display always shows something */
+	uint8_t any_enabled = 0;
+	for (uint8_t i = 0; i < LED_MODE_COUNT; i++)
+	{
+		if (mode_enabled[i])
+		{
+			any_enabled = 1;
+			break;
+		}
+	}
+
+	if (!any_enabled)
+		mode_enabled[LED_MODE_TIME] = 1;
 }
 
 void led_select_draw(void)

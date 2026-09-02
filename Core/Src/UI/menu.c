@@ -11,7 +11,7 @@
 
 typedef enum {
 	UI_CLOCK, UI_MENU, UI_SUBMENU, UI_EDIT, UI_STOPWATCH,
-	UI_LED_SELECT, UI_LED_INTERVAL
+	UI_LED_SELECT, UI_LED_INTERVAL, UI_VOLUME
 } ui_mode_t;
 
 typedef enum {
@@ -24,6 +24,10 @@ static const char *menu_labels[MENU_COUNT] =
 /* rows visible at once in the top-level menu at Font_11x18's 20px pitch
    on a 64px-tall display (0, 20, 44 -> last row ends at 62) */
 #define MENU_VISIBLE_ROWS 3
+
+/* rows visible at once in a submenu list at Font_7x10's 12px pitch, under
+   the header row (14, 26, 38, 50 -> last row ends at 60) */
+#define SUBMENU_VISIBLE_ROWS 4
 
 static ui_mode_t ui_mode = UI_CLOCK;
 static TimeEditor_t time_ed;
@@ -93,7 +97,14 @@ void menu_rotate(int32_t delta)
 {
 	if (delta == 0) return;
 
-	if (ui_mode == UI_MENU)
+	if (ui_mode == UI_CLOCK)
+	{
+		/* quick access - rotating with nothing open adjusts radio volume
+		   directly, no need to dive into Settings first */
+		radio_volume_adjust(delta);
+		ui_mode = UI_VOLUME;
+	}
+	else if (ui_mode == UI_MENU)
 	{
 		int32_t idx = ((menu_index + delta) % MENU_COUNT + MENU_COUNT) % MENU_COUNT;
 		menu_index = (int8_t) idx;
@@ -116,9 +127,13 @@ void menu_rotate(int32_t delta)
 	{
 		led_interval_rotate(delta);
 	}
+	else if (ui_mode == UI_VOLUME)
+	{
+		radio_volume_adjust(delta);
+	}
 	else
 	{
-		return; /* UI_CLOCK / UI_STOPWATCH - rotation does nothing */
+		return; /* UI_STOPWATCH - rotation does nothing */
 	}
 
 	menu_needs_redraw = 1;
@@ -189,8 +204,11 @@ void menu_tap(void)
 			case SETTINGS_ACTION_LED_SELECT:
 				ui_mode = UI_LED_SELECT;
 				break;
-			default:
+			case SETTINGS_ACTION_LED_INTERVAL:
 				ui_mode = UI_LED_INTERVAL;
+				break;
+			default:
+				ui_mode = UI_VOLUME;
 				break;
 			}
 			menu_needs_redraw = 1;
@@ -248,6 +266,10 @@ void menu_tap(void)
 	{
 		return_to_clock();
 	}
+	else if (ui_mode == UI_VOLUME)
+	{
+		return_to_clock();
+	}
 }
 
 void menu_tick(void)
@@ -301,12 +323,26 @@ void menu_draw(void)
 	{
 		uint8_t count = current_submenu_count();
 
+		/* same scrolling-window trick as the top-level menu - only
+		   SUBMENU_VISIBLE_ROWS fit under the header at Font_7x10's 12px
+		   pitch, so keep the window centred on submenu_index instead of
+		   only ever showing the first few entries */
+		uint8_t window_start = 0;
+		if (submenu_index >= SUBMENU_VISIBLE_ROWS)
+			window_start = submenu_index - SUBMENU_VISIBLE_ROWS + 1;
+		if (count > SUBMENU_VISIBLE_ROWS
+				&& window_start > count - SUBMENU_VISIBLE_ROWS)
+			window_start = count - SUBMENU_VISIBLE_ROWS;
+
 		oled_clear();
 		oled_line_small(0, 0, menu_labels[menu_index]);
-		for (uint8_t i = 0; i < count && i < 4; i++)
+		for (uint8_t row = 0;
+				row < SUBMENU_VISIBLE_ROWS && (window_start + row) < count;
+				row++)
 		{
-			oled_line_small(0, 14 + i * 12, i == submenu_index ? ">" : " ");
-			oled_line_small(10, 14 + i * 12, current_submenu_label(i));
+			uint8_t i = window_start + row;
+			oled_line_small(0, row * 12 + 14, i == submenu_index ? ">" : " ");
+			oled_line_small(10, row * 12 + 14, current_submenu_label(i));
 		}
 		oled_flush();
 	}
@@ -338,5 +374,23 @@ void menu_draw(void)
 	else if (ui_mode == UI_LED_INTERVAL)
 	{
 		led_interval_draw();
+	}
+	else if (ui_mode == UI_VOLUME)
+	{
+		uint8_t vol = radio_volume_get();
+
+		char bar[RADIO_VOLUME_MAX + 1];
+		for (uint8_t i = 0; i < RADIO_VOLUME_MAX; i++)
+			bar[i] = (i < vol) ? '#' : '-';
+		bar[RADIO_VOLUME_MAX] = '\0';
+
+		char line[16];
+		sprintf(line, "Vol: %u/%u", vol, RADIO_VOLUME_MAX);
+
+		oled_clear();
+		oled_line_small(0, 0, "Volume");
+		oled_line_large(0, 16, line);
+		oled_line_small(0, 44, bar);
+		oled_flush();
 	}
 }

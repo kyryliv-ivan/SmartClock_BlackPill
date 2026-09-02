@@ -23,6 +23,8 @@
 //                                   sent when the user picks a station in the
 //                                   OLED menu; STM32 and ESP32 must agree on
 //                                   the same station list/order)
+//     VOLUME:<0-10>                (STM32-side UI volume, scaled to the
+//                                   Audio library's 0-21 range)
 HardwareSerial stm32Serial(1);
 
 // NTP - Ukraine (EET/EEST, handles DST automatically)
@@ -37,13 +39,43 @@ struct RadioStation {
   const char* url;
 };
 
-// TODO: replace with the real station list once decided - keep the STM32
-// menu (whatever displays station names) in sync with this order, since
-// STM32 only ever sends an index, never a name/URL.
+// Keep this list (order and count) in sync with radio.c's `labels[]` on the
+// STM32 side, since STM32 only ever sends an index, never a name/URL.
+// Most stations are TAVR Media, sharing the online.<name>.ua/<Station>
+// stream layout; the rest are each station's own public icecast/nginx
+// endpoint. "Zakarpattya FM" is a bare IP:port, not a domain - if that IP
+// ever changes, this entry is the one to fix.
 const RadioStation stations[] = {
-  { "Hit FM",     "http://online.hitfm.ua/HitFM" },
-  { "Radio ROKS", "http://online.radioroks.ua/RadioROKS" },
-  { "Kiss FM",    "http://online.kissfm.ua/KissFM" },
+  { "Hit FM",           "http://online.hitfm.ua/HitFM" },
+  { "Radio ROKS",       "http://online.radioroks.ua/RadioROKS" },
+  { "Zakarpattya FM",   "http://195.234.148.51:8000/" },
+  { "Kiss FM",          "http://online.kissfm.ua/KissFM" },
+  { "Radio Relax",      "http://online.radiorelax.ua/RadioRelax" },
+  { "Melodia FM",       "https://online.melodiafm.ua/MelodiaFM" },
+  { "Nashe Radio",      "https://online.nasheradio.ua/NasheRadio" },
+  { "Ukr Radio 1",      "https://radio.ukr.radio/ur1-mp3" },
+  { "Ukr Radio 2",      "https://radio.ukr.radio/ur2-mp3" },
+  { "Avtoradio",        "https://cast.mediaonline.net.ua/avtoradio" },
+  { "Hromadske",        "https://hromadske.radio/radio_https_upstream" },
+  { "Ukr Radio 3",      "https://radio.ukr.radio/ur3-mp3" },
+  { "Ukr Radio 4",      "https://radio.ukr.radio/ur4-mp3" },
+  { "Kiss FM Ukr",      "https://online.kissfm.ua/KissFM_Ukr" },
+  { "Kiss Digital",     "https://online.kissfm.ua/KissFM_Digital" },
+  { "ROKS Ukr",         "http://online.radioroks.ua/RadioROKS_Ukr_HD" },
+  { "ROKS New Rock",    "http://online.radioroks.ua/RadioROKS_NewRock_HD" },
+  { "Relax Instr",      "https://online.radiorelax.ua/RadioRelax_Instrumental_HD" },
+  { "Hit FM Ukr",       "http://online.hitfm.ua/HitFM_Ukr" },
+  { "Hit FM Top",       "http://online.hitfm.ua/HitFM_Top" },
+  { "Melodia Romantic", "http://online.melodiafm.ua/MelodiaFM_Romantic_Live" },
+  { "Bayraktar",        "https://online.radiobayraktar.ua/RadioBayraktar" },
+  { "Nakypilo",         "https://radiostream.nakypilo.ua/full" },
+  { "MFM Ukraine",      "https://radio.mfm.ua/online128" },
+  { "Lviv Hvylya",      "http://onair.lviv.fm:8000/lviv32.fm" },
+  { "Radio Trek",       "http://online2.radiotrek.rv.ua:8000/AAC+_64" },
+  { "Lounge FM",        "https://cast.mediaonline.net.ua/loungefm320" },
+  { "Jazz FM",          "http://online.radiojazz.ua/RadioJazz" },
+  { "Radio Maximum",    "https://lux.radio.tvstitch.com/kyiv/max_adv_sd" },
+  { "Zahid FM",         "https://radio.zfm.com.ua:8443/zfm" },
 };
 const uint8_t STATION_COUNT = sizeof(stations) / sizeof(stations[0]);
 
@@ -169,7 +201,15 @@ void sendStatusToStm32() {
   stm32Serial.print(line);
 }
 
+// index 255 is a reserved "stop playback" sentinel sent by the STM32 side
+// (radio.c's "Stop" list entry), not a real station index.
 void playStation(uint8_t index) {
+  if (index == 255) {
+    Serial.println("Зупинка радіо");
+    audio.stopSong();
+    return;
+  }
+
   if (index >= STATION_COUNT) return;
 
   g_currentStation = index;
@@ -178,6 +218,13 @@ void playStation(uint8_t index) {
   Serial.println(stations[index].name);
 
   audio.connecttohost(stations[index].url);
+}
+
+// STM32-side UI works in a plain 0-10 range; the Audio library's setVolume()
+// takes 0-21, so scale up (rounding to nearest) instead of just truncating.
+void setVolumeFromStm32(uint8_t vol) {
+  if (vol > 10) vol = 10;
+  audio.setVolume((uint8_t)((vol * 21 + 5) / 10));
 }
 
 // Reads whatever STM32 has sent so far, one line at a time, and dispatches
@@ -195,6 +242,9 @@ void handleStm32Rx() {
 
       if (strncmp(rxLine, "STATION:", 8) == 0) {
         playStation((uint8_t)atoi(rxLine + 8));
+      }
+      else if (strncmp(rxLine, "VOLUME:", 7) == 0) {
+        setVolumeFromStm32((uint8_t)atoi(rxLine + 7));
       }
 
       rxLen = 0;
