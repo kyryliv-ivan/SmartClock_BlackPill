@@ -1,5 +1,6 @@
 #include "time_editor.h"
 #include "oled.h"
+#include "alarm.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -32,6 +33,14 @@ void time_editor_start_date(TimeEditor_t *ed)
     ed->mode  = EDIT_MODE_DATE;
 }
 
+void time_editor_start_alarm(TimeEditor_t *ed)
+{
+    ed->hours   = alarm_hour_get();
+    ed->minutes = alarm_minute_get();
+    ed->field   = EDIT_HOUR;
+    ed->mode    = EDIT_MODE_ALARM;
+}
+
 void time_editor_rotate(TimeEditor_t *ed, int32_t delta)
 {
     switch (ed->field)
@@ -46,7 +55,7 @@ void time_editor_rotate(TimeEditor_t *ed, int32_t delta)
 
 uint8_t time_editor_tap(TimeEditor_t *ed)
 {
-    if (ed->mode == EDIT_MODE_TIME)
+    if (ed->mode == EDIT_MODE_TIME || ed->mode == EDIT_MODE_ALARM)
     {
         if (ed->field == EDIT_MINUTE) return 1;
         ed->field = EDIT_MINUTE;
@@ -62,7 +71,10 @@ uint8_t time_editor_tap(TimeEditor_t *ed)
 
 void time_editor_commit(const TimeEditor_t *ed)
 {
-    time_set(ed->hours, ed->minutes, ed->day, ed->month, ed->year);
+    if (ed->mode == EDIT_MODE_ALARM)
+        alarm_set_time(ed->hours, ed->minutes);
+    else
+        time_set(ed->hours, ed->minutes, ed->day, ed->month, ed->year);
 }
 
 void time_editor_draw(const TimeEditor_t *ed)
@@ -73,12 +85,12 @@ void time_editor_draw(const TimeEditor_t *ed)
 
     oled_clear();
 
-    if (ed->mode == EDIT_MODE_TIME)
+    if (ed->mode == EDIT_MODE_TIME || ed->mode == EDIT_MODE_ALARM)
     {
         sprintf(line, "%02d:%02d", ed->hours, ed->minutes);
         uint8_t col = (ed->field == EDIT_HOUR) ? 0 : 3;
         cursor[col] = '^'; cursor[col + 1] = '^'; cursor[col + 2] = '\0';
-        oled_line_small(0, 0, "Set time:");
+        oled_line_small(0, 0, ed->mode == EDIT_MODE_ALARM ? "Set alarm:" : "Set time:");
     }
     else
     {

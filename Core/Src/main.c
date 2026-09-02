@@ -30,7 +30,9 @@
 #include "sensors.h"
 #include "led_display.h"
 #include "oled.h"
-#include "time_editor.h"
+#include "menu.h"
+#include "alarm.h"
+#include "led_menu.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -65,66 +67,6 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-/* --- OLED menu (opened by a tap on the encoder) -------------------------
- Font_7x10/Font_11x18 only cover ASCII, so labels stay in Latin/English -
- there is no Cyrillic glyph data in ssd1306_fonts.
-
- Three levels: CLOCK -> MENU (Alarm/Radio/WiFi, rotate to move) -> tap
- opens that item's own list (SUBMENU, rotate to move) -> tap on a list
- entry performs the action and drops straight back to CLOCK. */
-typedef enum {
-	UI_CLOCK, UI_MENU, UI_SUBMENU, UI_EDIT
-} ui_mode_t;
-typedef enum {
-	MENU_ALARM, MENU_RADIO, MENU_WIFI, MENU_SETTINGS, MENU_COUNT
-} menu_item_t;
-
-static const char *menu_labels[MENU_COUNT] = { "Alarm", "Radio", "WiFi", "Settings" };
-
-/* rows visible at once in the top-level menu at Font_11x18's 20px pitch
-   on a 64px-tall display (0, 20, 44 -> last row ends at 62) */
-#define MENU_VISIBLE_ROWS 3
-
-static const char *settings_labels[] = { "Set Time", "Set Date" };
-#define SETTINGS_COUNT (sizeof(settings_labels) / sizeof(settings_labels[0]))
-
-/* Radio station names - must stay in the same order as `stations[]` on the
- ESP32 side (see ESP32/SmartClock_ESP32/SmartClock_ESP32.ino), since only
- the index is sent over UART, never the name. */
-static const char *radio_labels[] = { "Hit FM", "Radio ROKS", "Kiss FM" };
-#define RADIO_COUNT (sizeof(radio_labels) / sizeof(radio_labels[0]))
-
-/* Placeholders - real Alarm/WiFi behaviour (time editor, status readout,
- ...) is still to be designed; these just make the 3-level menu testable
- end-to-end today. */
-static const char *alarm_labels[] = { "Off", "On" };
-#define ALARM_COUNT (sizeof(alarm_labels) / sizeof(alarm_labels[0]))
-
-static const char *wifi_labels[] = { "Status", "Reconnect" };
-#define WIFI_COUNT (sizeof(wifi_labels) / sizeof(wifi_labels[0]))
-
-static const char* const* submenu_labels(menu_item_t item, uint8_t *count)
-{
-	switch (item)
-	{
-	case MENU_ALARM:
-		*count = ALARM_COUNT;
-		return alarm_labels;
-	case MENU_RADIO:
-		*count = RADIO_COUNT;
-		return radio_labels;
-	case MENU_WIFI:
-		*count = WIFI_COUNT;
-		return wifi_labels;
-	case MENU_SETTINGS:
-		*count = SETTINGS_COUNT;
-		return settings_labels;
-	default:
-		*count = 0;
-		return NULL;
-	}
-}
 
 /* --- Battery level (PA5 / ADC1_IN5) --------------------------------------
  R1/R2 100k/100k divider off the raw battery net (B+/B-, tapped before
@@ -181,15 +123,6 @@ static uint8_t battery_read_percent(void)
 		}
 	}
 	return 0;
-}
-
-static void send_station_to_esp32(uint8_t index)
-{
-	char line[16];
-	int len = snprintf(line, sizeof(line), "STATION:%u\n", (unsigned) index);
-
-	/* rare, user-triggered event - a short blocking send is fine here */
-	HAL_UART_Transmit(&huart1, (uint8_t*) line, (uint16_t) len, 100);
 }
 
 /* --- Incoming link from ESP32 (TIME:/STATUS: lines) ---------------------
@@ -299,6 +232,8 @@ int main(void)
 	oled_init();
 
 	sensors_init();
+	led_menu_init();
+	menu_init();
 
 	/* slow-changing, so it's read on its own multi-second tick rather than
 	 every clock redraw. battery_pct_f is a smoothed (EMA) running value -
@@ -310,22 +245,6 @@ int main(void)
 	uint8_t battery_pct = (uint8_t) (battery_pct_f + 0.5f);
 
 	char last_time[16] = "";
-
-	ui_mode_t ui_mode = UI_CLOCK;
-	TimeEditor_t time_ed;
-	int8_t menu_index = 0;
-	int8_t submenu_index = 0;
-	uint32_t menu_last_activity = 0;
-	uint8_t menu_needs_redraw = 0;
-
-	/* remembers the last entry picked in each submenu (e.g. which radio
-	 station is currently playing), so reopening a submenu highlights the
-	 current choice instead of always starting back at index 0 */
-	int8_t last_submenu_index[MENU_COUNT] = { 0 };
-
-	//set itme / date
-//
-//   time_set(11, 25, 18, 8, 26);
 
 	/* USER CODE END 2 */
 
@@ -342,163 +261,27 @@ int main(void)
 		{
 			int32_t pos_delta = encoder_delta_get();
 
-			if (encoder_tapped_get())
+			if (alarm_is_ringing())
 			{
-				menu_last_activity = HAL_GetTick();
-
-				if (ui_mode == UI_CLOCK)
+				if (encoder_tapped_get())
 				{
-					ui_mode = UI_MENU;
-					menu_index = 0;
-					menu_needs_redraw = 1;
-				} else if (ui_mode == UI_MENU)
-				{
-					/* enter the chosen top-level item's own list, highlighting
-					 whatever was picked there last time */
-					ui_mode = UI_SUBMENU;
-					submenu_index = last_submenu_index[menu_index];
-					menu_needs_redraw = 1;
-				} else if (ui_mode == UI_SUBMENU) /* list entry picked */
-				{
-					uint8_t count;
-					const char *const*labels = submenu_labels(
-							(menu_item_t) menu_index, &count);
-
-					last_submenu_index[menu_index] = submenu_index;
-
-					if ((menu_item_t) menu_index == MENU_SETTINGS)
-					{
-						if (submenu_index == 0)
-							time_editor_start_time(&time_ed);
-						else
-							time_editor_start_date(&time_ed);
-						ui_mode = UI_EDIT;
-						menu_needs_redraw = 1;
-					}
-					else
-					{
-						if ((menu_item_t) menu_index == MENU_RADIO)
-						{
-							send_station_to_esp32((uint8_t) submenu_index);
-						}
-						/* MENU_ALARM / MENU_WIFI actions land here once their
-						 real behaviour (status/reconnect, ...) is decided. */
-
-						oled_clear();
-						oled_line_large(0, 24, labels[submenu_index]);
-						oled_line_small(0, 48, "selected");
-						oled_flush();
-
-						HAL_Delay(600);
-
-						ui_mode = UI_CLOCK;
-						last_time[0] = '\0'; /* force a clock redraw on next tick */
-					}
-				} else /* UI_EDIT: field confirmed via tap */
-				{
-					if (time_editor_tap(&time_ed))
-					{
-						time_editor_commit(&time_ed);
-						ui_mode = UI_CLOCK;
-						last_time[0] = '\0';
-					}
-					menu_needs_redraw = 1;
+					alarm_stop();
+					last_time[0] = '\0';
 				}
 			}
-
-			if (ui_mode == UI_MENU && pos_delta != 0)
+			else
 			{
-				int32_t idx = ((menu_index + pos_delta) % MENU_COUNT
-						+ MENU_COUNT) % MENU_COUNT;
-				menu_index = (int8_t) idx;
-				menu_needs_redraw = 1;
-				menu_last_activity = HAL_GetTick();
+				if (encoder_tapped_get())
+					menu_tap();
+
+				menu_rotate(pos_delta);
 			}
 
-			if (ui_mode == UI_SUBMENU && pos_delta != 0)
-			{
-				uint8_t count;
-				submenu_labels((menu_item_t) menu_index, &count);
+			menu_tick();
+			menu_draw();
 
-				int32_t idx = ((submenu_index + pos_delta) % count + count)
-						% count;
-				submenu_index = (int8_t) idx;
-				menu_needs_redraw = 1;
-				menu_last_activity = HAL_GetTick();
-			}
-
-			if (ui_mode == UI_EDIT && pos_delta != 0)
-			{
-				time_editor_rotate(&time_ed, pos_delta);
-				menu_needs_redraw = 1;
-				menu_last_activity = HAL_GetTick();
-			}
-
-			/* auto-return to the clock after a few seconds of inactivity,
-			 from either menu level */
-			if (ui_mode != UI_CLOCK
-					&& HAL_GetTick() - menu_last_activity >= 6000)
-			{
-				ui_mode = UI_CLOCK;
+			if (menu_consume_clock_redraw())
 				last_time[0] = '\0';
-			}
-
-			if (ui_mode == UI_MENU && menu_needs_redraw)
-			{
-				menu_needs_redraw = 0;
-
-				/* Only 3 rows fit on a 64px-tall display at Font_11x18's
-				   20px pitch (0, 20, 44 -> last row ends at 62). With more
-				   menu items than that, scroll a 3-row window so it always
-				   contains menu_index - recomputed fresh each redraw from
-				   menu_index alone, no extra persistent state needed. */
-				uint8_t window_start = 0;
-				if (menu_index >= MENU_VISIBLE_ROWS)
-					window_start = menu_index - MENU_VISIBLE_ROWS + 1;
-				if (MENU_COUNT > MENU_VISIBLE_ROWS
-						&& window_start > MENU_COUNT - MENU_VISIBLE_ROWS)
-					window_start = MENU_COUNT - MENU_VISIBLE_ROWS;
-
-				oled_clear();
-				for (uint8_t row = 0;
-						row < MENU_VISIBLE_ROWS
-								&& (window_start + row) < MENU_COUNT; row++)
-				{
-					uint8_t i = window_start + row;
-					oled_line_large(0, row * 20 + 4, i == menu_index ? ">" : " ");
-					oled_line_large(16, row * 20 + 4, menu_labels[i]);
-				}
-				oled_flush();
-			}
-
-			if (ui_mode == UI_SUBMENU && menu_needs_redraw)
-			{
-				menu_needs_redraw = 0;
-
-				uint8_t count;
-				const char *const*labels = submenu_labels(
-						(menu_item_t) menu_index, &count);
-
-				/* one row per entry - fine up to 4 items in the remaining
-				 54 px; a longer list (e.g. more radio stations) would
-				 need scrolling, not needed yet */
-				oled_clear();
-				oled_line_small(0, 0, menu_labels[menu_index]);
-
-				for (uint8_t i = 0; i < count && i < 4; i++)
-				{
-					oled_line_small(0, 14 + i * 12,
-							i == submenu_index ? ">" : " ");
-					oled_line_small(10, 14 + i * 12, labels[i]);
-				}
-				oled_flush();
-			}
-
-			if (ui_mode == UI_EDIT && menu_needs_redraw)
-			{
-				menu_needs_redraw = 0;
-				time_editor_draw(&time_ed);
-			}
 		}
 
 		/* Sensors - heavy I2C work (AHT20 has a blocking HAL_Delay(80)).
@@ -526,7 +309,7 @@ int main(void)
 			{
 				led_display_set_error();
 
-				if (ui_mode == UI_CLOCK)
+				if (!menu_active())
 				{
 					oled_clear();
 					oled_line_large(0, 24, "RTC ERROR");
@@ -534,8 +317,8 @@ int main(void)
 				}
 			} else
 			{
-				led_display_set_time(hour_get(), minute_get());
-				led_display_set_colon(1);
+				led_menu_tick();
+				alarm_check(hour_get(), minute_get());
 
 				char time_str[16];
 				char date_str[16];
@@ -543,7 +326,19 @@ int main(void)
 				sprintf(time_str, "%02d:%02d:%02d", hour_get(), minute_get(),
 						second_get());
 
-				if (ui_mode == UI_CLOCK && strcmp(time_str, last_time) != 0)
+				if (alarm_is_ringing())
+				{
+					led_display_set_colon((HAL_GetTick() / 300) % 2);
+
+					if (!menu_active())
+					{
+						oled_clear();
+						oled_line_large(0, 20, "ALARM!");
+						oled_line_small(0, 44, "tap to stop");
+						oled_flush();
+					}
+				}
+				else if (!menu_active() && strcmp(time_str, last_time) != 0)
 				{
 					strcpy(last_time, time_str);
 					sprintf(date_str, "%02d.%02d.20%02d", day_get(),

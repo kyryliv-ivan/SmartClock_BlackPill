@@ -4,7 +4,7 @@
 #include "sensors.h"
 
 typedef enum { EDIT_HOUR, EDIT_MINUTE, EDIT_DAY, EDIT_MONTH, EDIT_YEAR } edit_field_t;
-typedef enum { EDIT_MODE_TIME, EDIT_MODE_DATE } edit_mode_t;
+typedef enum { EDIT_MODE_TIME, EDIT_MODE_DATE, EDIT_MODE_ALARM } edit_mode_t;
 
 typedef struct
 {
@@ -15,6 +15,7 @@ typedef struct
 
 void time_editor_start_time(TimeEditor_t *ed);   /* edit Hour/Minute only */
 void time_editor_start_date(TimeEditor_t *ed);   /* edit Day/Month/Year only */
+void time_editor_start_alarm(TimeEditor_t *ed);  /* edit Hour/Minute, commits to the alarm */
 
 void    time_editor_rotate(TimeEditor_t *ed, int32_t delta);
 uint8_t time_editor_tap(TimeEditor_t *ed);       /* 1 = last field just confirmed */
