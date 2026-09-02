@@ -30,6 +30,7 @@
 #include "sensors.h"
 #include "led_display.h"
 #include "oled.h"
+#include "time_editor.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -73,13 +74,20 @@ void SystemClock_Config(void);
  opens that item's own list (SUBMENU, rotate to move) -> tap on a list
  entry performs the action and drops straight back to CLOCK. */
 typedef enum {
-	UI_CLOCK, UI_MENU, UI_SUBMENU
+	UI_CLOCK, UI_MENU, UI_SUBMENU, UI_EDIT
 } ui_mode_t;
 typedef enum {
-	MENU_ALARM, MENU_RADIO, MENU_WIFI, MENU_COUNT
+	MENU_ALARM, MENU_RADIO, MENU_WIFI, MENU_SETTINGS, MENU_COUNT
 } menu_item_t;
 
-static const char *menu_labels[MENU_COUNT] = { "Alarm", "Radio", "WiFi" };
+static const char *menu_labels[MENU_COUNT] = { "Alarm", "Radio", "WiFi", "Settings" };
+
+/* rows visible at once in the top-level menu at Font_11x18's 20px pitch
+   on a 64px-tall display (0, 20, 44 -> last row ends at 62) */
+#define MENU_VISIBLE_ROWS 3
+
+static const char *settings_labels[] = { "Set Time", "Set Date" };
+#define SETTINGS_COUNT (sizeof(settings_labels) / sizeof(settings_labels[0]))
 
 /* Radio station names - must stay in the same order as `stations[]` on the
  ESP32 side (see ESP32/SmartClock_ESP32/SmartClock_ESP32.ino), since only
@@ -109,6 +117,9 @@ static const char* const* submenu_labels(menu_item_t item, uint8_t *count)
 	case MENU_WIFI:
 		*count = WIFI_COUNT;
 		return wifi_labels;
+	case MENU_SETTINGS:
+		*count = SETTINGS_COUNT;
+		return settings_labels;
 	default:
 		*count = 0;
 		return NULL;
@@ -305,6 +316,14 @@ static volatile uint32_t last_button_tick = 0;
 
 static void encoder_update(void)
 {
+	/* Ignore rotation while the button is physically held down - the push
+	   switch and the rotary contacts share one shaft on cheap EC11
+	   modules, so pressing (especially holding a bit longer) can wobble
+	   the shaft enough to register as an accidental extra step alongside
+	   the tap, making one press feel like two actions. */
+	if (HAL_GPIO_ReadPin(ENC_GPIO_Port, ENC_SW_Pin) == GPIO_PIN_RESET)
+		return;
+
 	uint8_t a = HAL_GPIO_ReadPin(ENC_GPIO_Port, ENC_CLK_Pin);
 	uint8_t b = HAL_GPIO_ReadPin(ENC_GPIO_Port, ENC_DT_Pin);
 	uint8_t ab = (a << 1) | b;
@@ -420,6 +439,7 @@ int main(void)
 	char last_time[16] = "";
 
 	ui_mode_t ui_mode = UI_CLOCK;
+	TimeEditor_t time_ed;
 	int32_t last_enc_position = enc_position;
 	int8_t menu_index = 0;
 	int8_t submenu_index = 0;
@@ -469,7 +489,7 @@ int main(void)
 					ui_mode = UI_SUBMENU;
 					submenu_index = last_submenu_index[menu_index];
 					menu_needs_redraw = 1;
-				} else /* UI_SUBMENU: list entry picked - act, then straight back to clock */
+				} else if (ui_mode == UI_SUBMENU) /* list entry picked */
 				{
 					uint8_t count;
 					const char *const*labels = submenu_labels(
@@ -477,23 +497,43 @@ int main(void)
 
 					last_submenu_index[menu_index] = submenu_index;
 
-					if ((menu_item_t) menu_index == MENU_RADIO)
+					if ((menu_item_t) menu_index == MENU_SETTINGS)
 					{
-						send_station_to_esp32((uint8_t) submenu_index);
+						if (submenu_index == 0)
+							time_editor_start_time(&time_ed);
+						else
+							time_editor_start_date(&time_ed);
+						ui_mode = UI_EDIT;
+						menu_needs_redraw = 1;
 					}
-					/* MENU_ALARM / MENU_WIFI actions land here once their
-					 real behaviour (time editor, status/reconnect, ...)
-					 is decided. */
+					else
+					{
+						if ((menu_item_t) menu_index == MENU_RADIO)
+						{
+							send_station_to_esp32((uint8_t) submenu_index);
+						}
+						/* MENU_ALARM / MENU_WIFI actions land here once their
+						 real behaviour (status/reconnect, ...) is decided. */
 
-					oled_clear();
-					oled_line_large(0, 24, labels[submenu_index]);
-					oled_line_small(0, 48, "selected");
-					oled_flush();
+						oled_clear();
+						oled_line_large(0, 24, labels[submenu_index]);
+						oled_line_small(0, 48, "selected");
+						oled_flush();
 
-					HAL_Delay(600);
+						HAL_Delay(600);
 
-					ui_mode = UI_CLOCK;
-					last_time[0] = '\0'; /* force a clock redraw on next tick */
+						ui_mode = UI_CLOCK;
+						last_time[0] = '\0'; /* force a clock redraw on next tick */
+					}
+				} else /* UI_EDIT: field confirmed via tap */
+				{
+					if (time_editor_tap(&time_ed))
+					{
+						time_editor_commit(&time_ed);
+						ui_mode = UI_CLOCK;
+						last_time[0] = '\0';
+					}
+					menu_needs_redraw = 1;
 				}
 			}
 
@@ -518,6 +558,13 @@ int main(void)
 				menu_last_activity = HAL_GetTick();
 			}
 
+			if (ui_mode == UI_EDIT && pos_delta != 0)
+			{
+				time_editor_rotate(&time_ed, pos_delta);
+				menu_needs_redraw = 1;
+				menu_last_activity = HAL_GetTick();
+			}
+
 			/* auto-return to the clock after a few seconds of inactivity,
 			 from either menu level */
 			if (ui_mode != UI_CLOCK
@@ -531,11 +578,26 @@ int main(void)
 			{
 				menu_needs_redraw = 0;
 
+				/* Only 3 rows fit on a 64px-tall display at Font_11x18's
+				   20px pitch (0, 20, 44 -> last row ends at 62). With more
+				   menu items than that, scroll a 3-row window so it always
+				   contains menu_index - recomputed fresh each redraw from
+				   menu_index alone, no extra persistent state needed. */
+				uint8_t window_start = 0;
+				if (menu_index >= MENU_VISIBLE_ROWS)
+					window_start = menu_index - MENU_VISIBLE_ROWS + 1;
+				if (MENU_COUNT > MENU_VISIBLE_ROWS
+						&& window_start > MENU_COUNT - MENU_VISIBLE_ROWS)
+					window_start = MENU_COUNT - MENU_VISIBLE_ROWS;
+
 				oled_clear();
-				for (uint8_t i = 0; i < MENU_COUNT; i++)
+				for (uint8_t row = 0;
+						row < MENU_VISIBLE_ROWS
+								&& (window_start + row) < MENU_COUNT; row++)
 				{
-					oled_line_large(0, i * 20 + 4, i == menu_index ? ">" : " ");
-					oled_line_large(16, i * 20 + 4, menu_labels[i]);
+					uint8_t i = window_start + row;
+					oled_line_large(0, row * 20 + 4, i == menu_index ? ">" : " ");
+					oled_line_large(16, row * 20 + 4, menu_labels[i]);
 				}
 				oled_flush();
 			}
@@ -561,6 +623,12 @@ int main(void)
 					oled_line_small(10, 14 + i * 12, labels[i]);
 				}
 				oled_flush();
+			}
+
+			if (ui_mode == UI_EDIT && menu_needs_redraw)
+			{
+				menu_needs_redraw = 0;
+				time_editor_draw(&time_ed);
 			}
 		}
 
