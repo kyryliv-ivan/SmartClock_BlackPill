@@ -5,6 +5,7 @@
 #include <WebServer.h>
 #include <DNSServer.h>
 #include "Audio_nopsram.h"
+#include "SetupPage.h"
 
 #define I2S_BCLK  10
 #define I2S_LRC   11
@@ -20,6 +21,10 @@
 // Line-based protocol, one message per line ('\n' terminated):
 //   ESP32 -> STM32:
 //     TIME:2026-08-18T12:34:56
+//     SETTIME:2026-08-18T12:34:00  (manual override from the setup webpage's
+//                                   Date & Time card - unlike TIME: above,
+//                                   STM32 applies this every time, not just
+//                                   once after boot; see handleSetupSetTime())
 //     STATUS:WIFI_OK,RADIO_PLAY,<ssid>  (wifi: WIFI_OK/WIFI_DOWN, radio:
 //                                   RADIO_PLAY/RADIO_STOP, ssid empty
 //                                   while disconnected)
@@ -161,45 +166,6 @@ bool tryConnectSaved() {
 WebServer setupServer(80);
 DNSServer  dnsServer;
 
-const char SETUP_PAGE_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SmartClock Wi-Fi Setup</title>
-<style>
-body{font-family:sans-serif;margin:20px;}
-select,input,button{font-size:16px;padding:8px;width:100%;box-sizing:border-box;margin:6px 0;}
-</style></head><body>
-<h2>SmartClock - Wi-Fi Setup</h2>
-<p>Choose your Wi-Fi network and enter its password:</p>
-<select id="ssid"><option>Scanning...</option></select>
-<input type="password" id="password" placeholder="Password">
-<button onclick="doConnect()">Connect</button>
-<p id="status"></p>
-<script>
-fetch('/scan').then(r => r.json()).then(list => {
-  const sel = document.getElementById('ssid');
-  sel.innerHTML = '';
-  list.sort((a, b) => b.rssi - a.rssi).forEach(n => {
-    const opt = document.createElement('option');
-    opt.value = n.ssid;
-    opt.textContent = n.ssid + ' (' + n.rssi + ' dBm)';
-    sel.appendChild(opt);
-  });
-});
-function doConnect() {
-  const ssid = document.getElementById('ssid').value;
-  const password = document.getElementById('password').value;
-  document.getElementById('status').textContent = 'Connecting...';
-  const form = new URLSearchParams();
-  form.append('ssid', ssid);
-  form.append('password', password);
-  fetch('/connect', { method: 'POST', body: form })
-    .then(r => r.text())
-    .then(t => { document.getElementById('status').innerHTML = t; });
-}
-</script></body></html>
-)HTML";
-
 void onWifiConnected() {
   Serial.println("========================");
   Serial.println("Wi-Fi ПІДКЛЮЧЕНО!");
@@ -280,6 +246,24 @@ void handleSetupConnect() {
   // the same page (still reachable at the AP's own address)
 }
 
+// Setup page's Date & Time card - lets the user get a working clock without
+// ever touching Wi-Fi (once online, NTP takes over and this is moot).
+void handleSetupSetTime() {
+  String date = setupServer.arg("date"); // "YYYY-MM-DD" (HTML <input type=date>)
+  String time = setupServer.arg("time"); // "HH:MM"      (HTML <input type=time>)
+
+  if (date.length() != 10 || time.length() < 5) {
+    setupServer.send(400, "text/plain", "Invalid date/time.");
+    return;
+  }
+
+  char line[40];
+  snprintf(line, sizeof(line), "SETTIME:%sT%.5s:00\n", date.c_str(), time.c_str());
+  stm32Serial.print(line);
+
+  setupServer.send(200, "text/plain", "Clock set.");
+}
+
 // Captive-portal catch-all: any URL a phone's OS probes to detect a portal
 // (e.g. /generate_204, /hotspot-detect.html) redirects here instead of 404,
 // which is what makes most phones auto-pop the "Sign in to network" sheet.
@@ -315,6 +299,7 @@ void startSetupMode() {
   setupServer.on("/", handleSetupRoot);
   setupServer.on("/scan", handleSetupScan);
   setupServer.on("/connect", HTTP_POST, handleSetupConnect);
+  setupServer.on("/settime", HTTP_POST, handleSetupSetTime);
   setupServer.onNotFound(handleSetupNotFound);
   setupServer.begin();
 

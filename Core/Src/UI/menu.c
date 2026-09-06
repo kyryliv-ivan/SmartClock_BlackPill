@@ -270,6 +270,18 @@ void menu_tap(void)
 				menu_needs_redraw = 1;
 				qr_shown_this_setup = 1;
 			}
+			else if (action == WIFI_ACTION_SHOW_QR)
+			{
+				/* Pure display - no UART message, no WiFi state touched.
+				   Lets the user re-scan the setup AP's fixed credentials
+				   (e.g. to add a second phone) without erasing anything.
+				   Dismissed by tap or the normal UI_WIFI_QR timeout below;
+				   if this happens to coincide with a real setup session
+				   already in progress, the seen_setup_active tracking in
+				   menu_tick() still applies normally. */
+				ui_mode = UI_WIFI_QR;
+				menu_needs_redraw = 1;
+			}
 			else if (submenu_index == 0) /* Status */
 			{
 				oled_clear();

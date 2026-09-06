@@ -153,6 +153,20 @@ static void esp32_handle_line(const char *line)
 				rtc_synced = 1;
 			}
 		}
+	} else if (strncmp(line, "SETTIME:", 8) == 0)
+	{
+		/* Manual override from the ESP32 setup webpage's Date & Time card -
+		 unlike TIME: above, this applies every time it arrives, not just
+		 once, since the user might deliberately correct the clock again
+		 later. */
+		int year, month, day, h, m, s;
+
+		if (sscanf(line + 8, "%d-%d-%dT%d:%d:%d", &year, &month, &day, &h,
+				&m, &s) == 6)
+		{
+			time_set((uint8_t) h, (uint8_t) m, (uint8_t) day,
+					(uint8_t) month, (uint8_t) (year % 100));
+		}
 	} else if (strncmp(line, "STATUS:", 7) == 0)
 	{
 		/* "WIFI_OK,RADIO_PLAY,<ssid>" or "WIFI_DOWN,RADIO_STOP," (ssid

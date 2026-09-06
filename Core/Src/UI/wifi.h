@@ -6,7 +6,7 @@
 uint8_t     wifi_submenu_count(void);
 const char *wifi_submenu_label(uint8_t index);
 
-typedef enum { WIFI_ACTION_NONE, WIFI_ACTION_FORGET } wifi_action_t;
+typedef enum { WIFI_ACTION_NONE, WIFI_ACTION_FORGET, WIFI_ACTION_SHOW_QR } wifi_action_t;
 wifi_action_t wifi_submenu_tap(uint8_t index);
 
 /* state, populated from the ESP32's STATUS: line (see main.c) */

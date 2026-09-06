@@ -2,7 +2,7 @@
 #include "oled.h"
 #include <string.h>
 
-static const char *labels[] = { "Status", "Reconnect", "Forget WiFi" };
+static const char *labels[] = { "Status", "Reconnect", "QR Code", "Change WiFi" };
 #define COUNT (sizeof(labels) / sizeof(labels[0]))
 
 static uint8_t connected = 0;
@@ -17,7 +17,9 @@ const char *wifi_submenu_label(uint8_t index)
 
 wifi_action_t wifi_submenu_tap(uint8_t index)
 {
-	if (index == 2) /* Forget WiFi */
+	if (index == 2) /* QR Code - just display it, no WiFi state change */
+		return WIFI_ACTION_SHOW_QR;
+	if (index == 3) /* Change WiFi - erase saved creds, back to setup AP */
 		return WIFI_ACTION_FORGET;
 
 	return WIFI_ACTION_NONE; /* Status / Reconnect handled by menu.c */
