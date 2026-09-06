@@ -6,8 +6,37 @@
  */
 
 #include "led_display.h"
+#include "tim.h"
 
 #define COLON_BIT  (1U << 4)
+
+/* One multiplex slot = one full TIM10 period (Period=1999 -> 2000 timer
+   ticks, 1us/tick at the configured Prescaler=95 -> ~2ms/digit). Brightness
+   is a software PWM on OE, synced to this same timer: TIM10's Update event
+   (HAL_TIM_PeriodElapsedCallback, already driving multiplex_step()) turns
+   OE on at the start of each slot, and its Output Compare channel 1
+   (HAL_TIM_OC_DelayElapsedCallback, added here - doesn't drive any GPIO
+   itself, "Timing" mode is purely an interrupt source) turns it back off
+   partway through, proportional to level/LED_BRIGHTNESS_MAX.
+
+   Level 10 (the top of the dial) is deliberately capped at 70% of the
+   slot, not 100% - each digit is already only lit 1 of every 4 slots from
+   multiplexing alone, and going further from there felt too intense at
+   the "max" setting. Every level scales off that same 70% ceiling. */
+#define MUX_SLOT_TICKS      2000
+#define LED_BRIGHTNESS_CAP_PCT 40
+
+static uint8_t brightness = 3;
+
+static uint16_t brightness_to_ccr(uint8_t level)
+{
+	uint16_t cap_ticks = (uint16_t) ((uint32_t) MUX_SLOT_TICKS
+			* LED_BRIGHTNESS_CAP_PCT / 100);
+
+	if (level == 0) return 0;
+	if (level >= LED_BRIGHTNESS_MAX) return cap_ticks;
+	return (uint16_t) ((uint32_t) level * cap_ticks / LED_BRIGHTNESS_MAX);
+}
 
 /* digit slots hold 0-9 for real digits, or one of these symbolic glyphs -
    all indices into the same segment_map[] table below */
@@ -71,9 +100,12 @@ static void multiplex_step(void)
 		ctrl |= COLON_BIT;
 	segment |= 0x80;
 
-	HAL_GPIO_WritePin(SR_OE_Port, SR_OE_Pin, GPIO_PIN_SET);   // OE_OFF
+	HAL_GPIO_WritePin(SR_OE_Port, SR_OE_Pin, GPIO_PIN_SET);   // OE_OFF (during shift)
 	shift16(((uint16_t) ctrl << 8) | segment);
-	HAL_GPIO_WritePin(SR_OE_Port, SR_OE_Pin, GPIO_PIN_RESET); // OE_ON
+
+	if (brightness > 0)
+		HAL_GPIO_WritePin(SR_OE_Port, SR_OE_Pin, GPIO_PIN_RESET); // OE_ON - HAL_TIM_OC_DelayElapsedCallback cuts this short at the current level's duty
+	/* brightness == 0: leave OE off - blank slot */
 
 	mux_index = (i + 1) & 0x03;
 }
@@ -95,6 +127,17 @@ void led_display_init(void)
 	HAL_GPIO_Init(SR_OE_Port, &GPIO_InitStruct);
 
 	HAL_GPIO_WritePin(SR_OE_Port, SR_OE_Pin, GPIO_PIN_SET); // OE_OFF start
+
+	/* TIM_OCMODE_TIMING drives no pin at all - it's purely a second
+	   interrupt source on the same already-running TIM10, used to cut the
+	   OE_ON window short for brightness. Doesn't touch the .ioc/CubeMX
+	   config; htim10 is already initialized as a running time base by
+	   MX_TIM10_Init() before this runs. */
+	TIM_OC_InitTypeDef sConfigOC = { 0 };
+	sConfigOC.OCMode = TIM_OCMODE_TIMING;
+	sConfigOC.Pulse = brightness_to_ccr(brightness);
+	HAL_TIM_OC_ConfigChannel(&htim10, &sConfigOC, TIM_CHANNEL_1);
+	HAL_TIM_OC_Start_IT(&htim10, TIM_CHANNEL_1);
 }
 
 void led_display_set_time(uint8_t hours, uint8_t minutes)
@@ -161,11 +204,38 @@ void led_display_set_eq(uint8_t l0, uint8_t l1, uint8_t l2, uint8_t l3)
 	colon_on = 0;
 }
 
+void led_brightness_set(uint8_t level)
+{
+	if (level > LED_BRIGHTNESS_MAX) level = LED_BRIGHTNESS_MAX;
+	brightness = level;
+	htim10.Instance->CCR1 = brightness_to_ccr(level);
+}
+
+uint8_t led_brightness_get(void) { return brightness; }
+
+void led_brightness_adjust(int32_t delta)
+{
+	int32_t v = (int32_t) brightness + delta;
+	if (v < 0) v = 0;
+	if (v > LED_BRIGHTNESS_MAX) v = LED_BRIGHTNESS_MAX;
+	led_brightness_set((uint8_t) v);
+}
+
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
     if (htim->Instance == TIM10)
     {
         multiplex_step();
     }
+}
+
+void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef *htim)
+{
+	if (htim->Instance == TIM10)
+	{
+		/* mid-slot cutoff for dimming - fires at every level, including
+		   max (capped at LED_BRIGHTNESS_CAP_PCT of the slot, not 100%) */
+		HAL_GPIO_WritePin(SR_OE_Port, SR_OE_Pin, GPIO_PIN_SET);
+	}
 }
 

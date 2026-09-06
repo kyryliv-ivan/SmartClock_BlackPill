@@ -39,7 +39,7 @@ void radio_submenu_tap(uint8_t index)
 	HAL_UART_Transmit(&huart1, (uint8_t*) line, (uint16_t) len, 100);
 }
 
-static uint8_t volume = 5;
+static uint8_t volume = 3;
 
 static void send_volume(void)
 {

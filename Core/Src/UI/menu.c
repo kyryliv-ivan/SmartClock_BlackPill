@@ -7,13 +7,14 @@
 #include "settings.h"
 #include "stopwatch.h"
 #include "led_menu.h"
+#include "led_display.h"
 #include "usart.h"
 #include <stdio.h>
 #include <string.h>
 
 typedef enum {
 	UI_CLOCK, UI_MENU, UI_SUBMENU, UI_EDIT, UI_STOPWATCH,
-	UI_LED_SELECT, UI_LED_INTERVAL, UI_VOLUME, UI_WIFI_QR
+	UI_LED_SELECT, UI_LED_INTERVAL, UI_VOLUME, UI_LED_BRIGHTNESS, UI_WIFI_QR
 } ui_mode_t;
 
 typedef enum {
@@ -149,6 +150,10 @@ void menu_rotate(int32_t delta)
 	{
 		radio_volume_adjust(delta);
 	}
+	else if (ui_mode == UI_LED_BRIGHTNESS)
+	{
+		led_brightness_adjust(delta);
+	}
 	else
 	{
 		return; /* UI_STOPWATCH - rotation does nothing */
@@ -224,6 +229,9 @@ void menu_tap(void)
 				break;
 			case SETTINGS_ACTION_LED_INTERVAL:
 				ui_mode = UI_LED_INTERVAL;
+				break;
+			case SETTINGS_ACTION_LED_BRIGHTNESS:
+				ui_mode = UI_LED_BRIGHTNESS;
 				break;
 			default:
 				ui_mode = UI_VOLUME;
@@ -344,6 +352,10 @@ void menu_tap(void)
 		return_to_clock();
 	}
 	else if (ui_mode == UI_VOLUME)
+	{
+		return_to_clock();
+	}
+	else if (ui_mode == UI_LED_BRIGHTNESS)
 	{
 		return_to_clock();
 	}
@@ -544,6 +556,28 @@ void menu_draw(void)
 
 		oled_clear();
 		oled_line_small(0, 0, "Volume");
+		oled_line_large(0, 16, line);
+		oled_line_small(0, 44, bar);
+		oled_flush();
+	}
+	else if (ui_mode == UI_LED_BRIGHTNESS)
+	{
+		uint8_t lvl = led_brightness_get();
+
+		char bar[LED_BRIGHTNESS_MAX + 1];
+		for (uint8_t i = 0; i < LED_BRIGHTNESS_MAX; i++)
+			bar[i] = (i < lvl) ? '#' : '-';
+		bar[LED_BRIGHTNESS_MAX] = '\0';
+
+		/* no "Bright: " prefix here - at Font_11x18 that made the line wider
+		   than the 128px screen ("Bright: 10/10" = 13 chars * 11px = 143px),
+		   which clipped the trailing digit. The small header above already
+		   says what this is. */
+		char line[8];
+		sprintf(line, "%u/%u", lvl, LED_BRIGHTNESS_MAX);
+
+		oled_clear();
+		oled_line_small(0, 0, "LED Brightness");
 		oled_line_large(0, 16, line);
 		oled_line_small(0, 44, bar);
 		oled_flush();
