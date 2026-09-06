@@ -32,6 +32,8 @@
 #include "oled.h"
 #include "menu.h"
 #include "alarm.h"
+#include "wifi.h"
+#include "radio.h"
 #include "led_menu.h"
 #include <stdio.h>
 #include <string.h>
@@ -130,8 +132,6 @@ static uint8_t battery_read_percent(void)
  CubeMX, so RX is polled from the main loop instead of interrupt-driven -
  same non-blocking style as everything else here. */
 
-static char esp32_status[32] = "";
-
 static void esp32_handle_line(const char *line)
 {
 	if (strncmp(line, "TIME:", 5) == 0)
@@ -155,10 +155,18 @@ static void esp32_handle_line(const char *line)
 		}
 	} else if (strncmp(line, "STATUS:", 7) == 0)
 	{
-		/* e.g. "WIFI_OK,RADIO_PLAY" - kept for the WiFi submenu's Status
-		 entry once that's wired up to actually display it. */
-		strncpy(esp32_status, line + 7, sizeof(esp32_status) - 1);
-		esp32_status[sizeof(esp32_status) - 1] = '\0';
+		/* "WIFI_OK,RADIO_PLAY,<ssid>" or "WIFI_DOWN,RADIO_STOP," (ssid
+		 empty while disconnected) - feeds the WiFi submenu's Status entry. */
+		char wifi_state[16] = "";
+		char radio_state[16] = "";
+		char ssid_buf[32] = "";
+
+		sscanf(line + 7, "%15[^,],%15[^,],%31[^\n]", wifi_state, radio_state,
+				ssid_buf);
+
+		wifi_connected_set(strcmp(wifi_state, "WIFI_OK") == 0);
+		wifi_ssid_set(ssid_buf);
+		radio_playing_set(strcmp(radio_state, "RADIO_PLAY") == 0);
 	} else if (strncmp(line, "EQ:", 3) == 0)
 	{
 		int l0, l1, l2, l3;
@@ -169,6 +177,21 @@ static void esp32_handle_line(const char *line)
 			eq_level_set(1, (uint8_t) l1);
 			eq_level_set(2, (uint8_t) l2);
 			eq_level_set(3, (uint8_t) l3);
+		}
+	} else if (strncmp(line, "SETUP_MODE:", 11) == 0)
+	{
+		uint8_t on = (uint8_t) (line[11] == '1');
+		wifi_setup_mode_set(on);
+
+		if (on)
+		{
+			/* ESP32 stops sending STATUS:/EQ: entirely while its own
+			   loop() is busy running the setup AP - without this, WiFi/
+			   radio state here would just stay frozen at whatever it was
+			   right before setup mode started instead of reflecting
+			   reality (nothing is connected or playing right now). */
+			wifi_connected_set(0);
+			radio_playing_set(0);
 		}
 	}
 }
@@ -316,6 +339,8 @@ int main(void)
 		{
 			last_read = HAL_GetTick();
 
+			/* QR display is entirely menu.c's job (UI_WIFI_QR) - this loop
+			   only needs to stay out of its way via menu_active() below. */
 			if (!rtc_ok_get())
 			{
 				led_display_set_error();
@@ -349,7 +374,11 @@ int main(void)
 						oled_flush();
 					}
 				}
-				else if (!menu_active() && strcmp(time_str, last_time) != 0)
+				else if (menu_active())
+				{
+					/* menu.c owns the OLED right now - leave it alone */
+				}
+				else if (strcmp(time_str, last_time) != 0)
 				{
 					strcpy(last_time, time_str);
 					sprintf(date_str, "%02d.%02d.20%02d", day_get(),

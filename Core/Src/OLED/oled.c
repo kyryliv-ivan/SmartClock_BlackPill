@@ -31,6 +31,11 @@ void oled_line_small(uint8_t x, uint8_t y, const char *text)
 	ssd1306_WriteString((char*) text, Font_7x10, White);
 }
 
+void oled_draw_bitmap(uint8_t x, uint8_t y, const uint8_t *bitmap, uint8_t w, uint8_t h)
+{
+	ssd1306_DrawBitmap(x, y, bitmap, w, h, White);
+}
+
 void oled_flush(void)
 {
 	ssd1306_UpdateScreen();

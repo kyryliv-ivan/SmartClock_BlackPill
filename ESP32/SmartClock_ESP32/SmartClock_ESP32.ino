@@ -2,6 +2,8 @@
 #include <esp_wifi.h>
 #include <time.h>
 #include <math.h>
+#include <WebServer.h>
+#include <DNSServer.h>
 #include "Audio_nopsram.h"
 
 #define I2S_BCLK  10
@@ -18,9 +20,14 @@
 // Line-based protocol, one message per line ('\n' terminated):
 //   ESP32 -> STM32:
 //     TIME:2026-08-18T12:34:56
-//     STATUS:WIFI_OK,RADIO_PLAY   (or WIFI_DOWN / RADIO_BUFFERING / RADIO_STOP)
+//     STATUS:WIFI_OK,RADIO_PLAY,<ssid>  (wifi: WIFI_OK/WIFI_DOWN, radio:
+//                                   RADIO_PLAY/RADIO_STOP, ssid empty
+//                                   while disconnected)
 //     EQ:<l0>,<l1>,<l2>,<l3>       (0-4 each: bass, low-mid, high-mid,
 //                                   treble peak-hold - see eqSendIfDue())
+//     SETUP_MODE:1 / SETUP_MODE:0  (1 = no saved WiFi, running the
+//                                   SmartClock AP + setup webpage; 0 =
+//                                   back to normal once connected)
 //   STM32 -> ESP32:
 //     STATION:<index>             (index into the `stations[]` table below -
 //                                   sent when the user picks a station in the
@@ -28,6 +35,11 @@
 //                                   the same station list/order)
 //     VOLUME:<0-10>                (STM32-side UI volume, scaled to the
 //                                   Audio library's 0-21 range)
+//     RECONNECT:1                  (WiFi submenu's Reconnect entry - drops
+//                                   and retries the saved network)
+//     FORGET_WIFI:1                 (WiFi submenu's Forget WiFi entry -
+//                                   erases saved creds and reboots into
+//                                   the SmartClock setup AP)
 HardwareSerial stm32Serial(1);
 
 // NTP - Ukraine (EET/EEST, handles DST automatically)
@@ -81,11 +93,18 @@ const RadioStation stations[] = {
 };
 const uint8_t STATION_COUNT = sizeof(stations) / sizeof(stations[0]);
 
-String g_ssid;
-String g_password;
 bool g_wifiReady = false;
 bool g_ntpSynced = false;
 uint8_t g_currentStation = 0;
+bool g_setupMode = false; // true while the setup AP (see below) is up
+
+// Limits how many times a dropped connection retries before giving up and
+// broadcasting the setup AP instead - without this, a network that's
+// reachable but never fully handshakes (bad password saved, router issue,
+// etc.) retries every 5s forever, and the device never becomes usable
+// either as a client or as its own AP.
+#define STA_RETRY_LIMIT 3
+static uint8_t g_staRetryCount = 0;
 
 void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
@@ -94,6 +113,17 @@ void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 
     g_wifiReady = false;
 
+    if (g_setupMode) return; // already broadcasting our own AP, nothing to retry
+
+    g_staRetryCount++;
+    if (g_staRetryCount > STA_RETRY_LIMIT) {
+      Serial.println("Забагато невдалих спроб - переходжу в setup-режим");
+      g_staRetryCount = 0;
+      WiFi.disconnect();
+      startSetupMode();
+      return;
+    }
+
     WiFi.disconnect();
     delay(5000);
     esp_wifi_connect(); // використає ті самі (вже збережені) дані
@@ -101,6 +131,7 @@ void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 
   if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
     g_wifiReady = true;
+    g_staRetryCount = 0;
   }
 }
 
@@ -118,68 +149,183 @@ bool tryConnectSaved() {
   return false;
 }
 
-void manualSetup() {
-  Serial.println("Сканування Wi-Fi...");
+// --- QR-code WiFi setup ----------------------------------------------------
+// No saved network on first boot? Instead of the old Serial-terminal flow
+// (useless without a PC), put up a WPA2-protected access point + a small
+// webpage so setup works from just a phone. The AP's SSID/password are
+// fixed, so the QR code that gets it (shown on the STM32 OLED, see
+// wifi.c) can be a pre-rendered bitmap instead of encoded on-device.
+#define SETUP_AP_SSID "SmartClock"
+#define SETUP_AP_PASSWORD "SmartClock" // 10 chars - clears WPA2's 8-char minimum
 
+WebServer setupServer(80);
+DNSServer  dnsServer;
+
+const char SETUP_PAGE_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SmartClock Wi-Fi Setup</title>
+<style>
+body{font-family:sans-serif;margin:20px;}
+select,input,button{font-size:16px;padding:8px;width:100%;box-sizing:border-box;margin:6px 0;}
+</style></head><body>
+<h2>SmartClock - Wi-Fi Setup</h2>
+<p>Choose your Wi-Fi network and enter its password:</p>
+<select id="ssid"><option>Scanning...</option></select>
+<input type="password" id="password" placeholder="Password">
+<button onclick="doConnect()">Connect</button>
+<p id="status"></p>
+<script>
+fetch('/scan').then(r => r.json()).then(list => {
+  const sel = document.getElementById('ssid');
+  sel.innerHTML = '';
+  list.sort((a, b) => b.rssi - a.rssi).forEach(n => {
+    const opt = document.createElement('option');
+    opt.value = n.ssid;
+    opt.textContent = n.ssid + ' (' + n.rssi + ' dBm)';
+    sel.appendChild(opt);
+  });
+});
+function doConnect() {
+  const ssid = document.getElementById('ssid').value;
+  const password = document.getElementById('password').value;
+  document.getElementById('status').textContent = 'Connecting...';
+  const form = new URLSearchParams();
+  form.append('ssid', ssid);
+  form.append('password', password);
+  fetch('/connect', { method: 'POST', body: form })
+    .then(r => r.text())
+    .then(t => { document.getElementById('status').innerHTML = t; });
+}
+</script></body></html>
+)HTML";
+
+void onWifiConnected() {
+  Serial.println("========================");
+  Serial.println("Wi-Fi ПІДКЛЮЧЕНО!");
+  Serial.println("========================");
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());
+
+  g_wifiReady = true;
+
+  configTime(gmtOffsetSec, daylightOffsetSec, ntpServer);
+
+  audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
+  audio.setVolume(8);
+
+  playStation(g_currentStation);
+}
+
+void handleSetupRoot() {
+  setupServer.send(200, "text/html", SETUP_PAGE_HTML);
+}
+
+void handleSetupScan() {
   int n = WiFi.scanNetworks();
-  if (n == 0) {
-    Serial.println("Мереж не знайдено.");
-    return;
-  }
-
-  Serial.print("Знайдено мереж: ");
-  Serial.println(n);
-  Serial.println();
-
+  String json = "[";
   for (int i = 0; i < n; i++) {
-    Serial.print(i + 1);
-    Serial.print(": ");
-    Serial.print(WiFi.SSID(i));
-    Serial.print(" | RSSI: ");
-    Serial.print(WiFi.RSSI(i));
-    Serial.println(" dBm");
+    if (i) json += ",";
+    json += "{\"ssid\":\"" + WiFi.SSID(i) + "\",\"rssi\":" + String(WiFi.RSSI(i)) + "}";
   }
+  json += "]";
+  setupServer.send(200, "application/json", json);
+}
 
-  Serial.println();
-  Serial.println("Введіть номер мережі і натисніть Enter:");
+void stopSetupMode() {
+  dnsServer.stop();
+  setupServer.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+  g_setupMode = false;
+  stm32Serial.print("SETUP_MODE:0\n");
 
-  while (!Serial.available()) delay(100);
-  int selectedIndex = Serial.parseInt();
-  while (Serial.available()) Serial.read();
+  // Whatever the STM32 sent while setup mode was up (e.g. a stray/phantom
+  // Forget WiFi tap while the QR was showing) never got read - handleStm32Rx()
+  // is skipped entirely during setup mode. Without this it would fire right
+  // now, seconds or minutes late, immediately after the credentials it's
+  // about to erase were just saved.
+  while (stm32Serial.available()) stm32Serial.read();
+}
 
-  if (selectedIndex < 1 || selectedIndex > n) {
-    Serial.println("Невірний номер. Перезапустіть плату.");
-    return;
-  }
+void handleSetupConnect() {
+  String ssid = setupServer.arg("ssid");
+  String password = setupServer.arg("password");
 
-  g_ssid = WiFi.SSID(selectedIndex - 1);
+  setupServer.send(200, "text/html",
+      "Connecting to <b>" + ssid + "</b>&hellip; you can close this page.");
+  delay(300); // let the response actually go out before we touch the radio
 
-  Serial.print("Обрано мережу: ");
-  Serial.println(g_ssid);
-  Serial.println("Введіть пароль і натисніть Enter:");
-
-  while (!Serial.available()) delay(100);
-  g_password = Serial.readStringUntil('\n');
-  g_password.trim();
-
-  Serial.print("Підключення до: ");
-  Serial.println(g_ssid);
+  WiFi.mode(WIFI_AP_STA); // keep the AP up while STA tries to join
 
   wifi_config_t conf = {};
-  strncpy((char*)conf.sta.ssid, g_ssid.c_str(), sizeof(conf.sta.ssid));
-  strncpy((char*)conf.sta.password, g_password.c_str(), sizeof(conf.sta.password));
+  strncpy((char*)conf.sta.ssid, ssid.c_str(), sizeof(conf.sta.ssid));
+  strncpy((char*)conf.sta.password, password.c_str(), sizeof(conf.sta.password));
   conf.sta.pmf_cfg.capable = true;
   conf.sta.pmf_cfg.required = false;
 
-  esp_wifi_set_config(WIFI_IF_STA, &conf); // за замовчуванням зберігається у флеш
+  esp_wifi_set_config(WIFI_IF_STA, &conf); // persisted to flash by default
   esp_wifi_connect();
 
-  for (int i = 0; i < 30; i++) {
+  for (int i = 0; i < 20; i++) {
     if (WiFi.status() == WL_CONNECTED) break;
     delay(500);
-    Serial.print(".");
   }
-  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    stopSetupMode();
+    onWifiConnected();
+  }
+  // wrong password / out of range - stays in AP+STA, user just retries via
+  // the same page (still reachable at the AP's own address)
+}
+
+// Captive-portal catch-all: any URL a phone's OS probes to detect a portal
+// (e.g. /generate_204, /hotspot-detect.html) redirects here instead of 404,
+// which is what makes most phones auto-pop the "Sign in to network" sheet.
+void handleSetupNotFound() {
+  setupServer.sendHeader("Location", "http://" + WiFi.softAPIP().toString() + "/", true);
+  setupServer.send(302, "text/plain", "");
+}
+
+void startSetupMode() {
+  g_setupMode = true;
+
+  // handleStm32Rx() doesn't run at all while setup mode is active (see
+  // loop()) - anything already sitting in the RX buffer from before this
+  // moment would otherwise just wait there and fire the instant setup mode
+  // ends, regardless of how stale it is by then. Discard it.
+  while (stm32Serial.available()) stm32Serial.read();
+
+  WiFi.mode(WIFI_AP);
+
+  // Power-save on the radio can starve the WPA handshake mid-association -
+  // a well-known cause of iOS reporting "Unable to Join" on the very first
+  // attempt against an ESP32 SoftAP. Must be set AFTER WiFi.mode(WIFI_AP).
+  esp_wifi_set_ps(WIFI_PS_NONE);
+
+  // Explicit channel (1) and max_connection - some phones fail to
+  // associate on whatever channel softAP() picks by default when it's
+  // left unspecified.
+  bool apOk = WiFi.softAP(SETUP_AP_SSID, SETUP_AP_PASSWORD, /*channel=*/1,
+                           /*hidden=*/0, /*max_connection=*/4);
+
+  dnsServer.start(53, "*", WiFi.softAPIP());
+
+  setupServer.on("/", handleSetupRoot);
+  setupServer.on("/scan", handleSetupScan);
+  setupServer.on("/connect", HTTP_POST, handleSetupConnect);
+  setupServer.onNotFound(handleSetupNotFound);
+  setupServer.begin();
+
+  Serial.print("Setup AP \"");
+  Serial.print(SETUP_AP_SSID);
+  Serial.print("\" ");
+  Serial.println(apOk ? "started OK" : "FAILED to start");
+  Serial.print("AP IP: ");
+  Serial.println(WiFi.softAPIP());
+
+  stm32Serial.print("SETUP_MODE:1\n");
 }
 
 // Sends "TIME:YYYY-MM-DDTHH:MM:SS\n" to STM32. Returns false if NTP time
@@ -196,10 +342,11 @@ bool sendTimeToStm32() {
 }
 
 void sendStatusToStm32() {
-  char line[48];
-  snprintf(line, sizeof(line), "STATUS:%s,%s\n",
+  char line[80];
+  snprintf(line, sizeof(line), "STATUS:%s,%s,%s\n",
            g_wifiReady ? "WIFI_OK" : "WIFI_DOWN",
-           audio.isRunning() ? "RADIO_PLAY" : "RADIO_STOP");
+           audio.isRunning() ? "RADIO_PLAY" : "RADIO_STOP",
+           g_wifiReady ? WiFi.SSID().c_str() : "");
   stm32Serial.print(line);
 }
 
@@ -325,6 +472,18 @@ void handleStm32Rx() {
       else if (strncmp(rxLine, "VOLUME:", 7) == 0) {
         setVolumeFromStm32((uint8_t)atoi(rxLine + 7));
       }
+      else if (strncmp(rxLine, "RECONNECT:", 10) == 0) {
+        Serial.println("Перепідключення WiFi...");
+        WiFi.disconnect();
+        g_wifiReady = false;
+        tryConnectSaved();
+      }
+      else if (strncmp(rxLine, "FORGET_WIFI:", 12) == 0) {
+        Serial.println("Забуваю WiFi, перезапуск у режим налаштування...");
+        WiFi.disconnect(false, true); // erase saved creds, keep radio on
+        delay(200); // let the erase land in flash before restarting
+        ESP.restart();
+      }
 
       rxLen = 0;
     }
@@ -349,32 +508,20 @@ void setup() {
 
   bool connected = tryConnectSaved();
 
-  if (!connected) {
-    manualSetup();
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("========================");
-    Serial.println("Wi-Fi ПІДКЛЮЧЕНО!");
-    Serial.println("========================");
-    Serial.print("IP: ");
-    Serial.println(WiFi.localIP());
-
-    g_wifiReady = true;
-
-    configTime(gmtOffsetSec, daylightOffsetSec, ntpServer);
-
-    audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
-    audio.setVolume(8);
-
-    playStation(g_currentStation);
+  if (connected) {
+    onWifiConnected();
   } else {
-    Serial.print("ПОМИЛКА. WiFi.status() = ");
-    Serial.println(WiFi.status());
+    startSetupMode();
   }
 }
 
 void loop() {
+  if (g_setupMode) {
+    dnsServer.processNextRequest();
+    setupServer.handleClient();
+    return; // no radio/UART traffic to STM32 while the AP is up
+  }
+
   if (g_wifiReady) {
     audio.loop();
   }

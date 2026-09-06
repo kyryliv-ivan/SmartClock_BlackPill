@@ -64,3 +64,8 @@ void radio_volume_adjust(int32_t delta)
 	volume = (uint8_t) v;
 	send_volume();
 }
+
+static uint8_t playing = 0;
+
+void radio_playing_set(uint8_t p) { playing = p; }
+uint8_t radio_playing_get(void)   { return playing; }

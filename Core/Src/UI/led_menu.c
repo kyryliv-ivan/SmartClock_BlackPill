@@ -2,6 +2,7 @@
 #include "sensors.h"
 #include "led_display.h"
 #include "oled.h"
+#include "radio.h"
 #include <stdio.h>
 
 typedef enum {
@@ -75,8 +76,19 @@ void led_menu_tick(void)
 		led_display_set_pressure((uint16_t) pressure_get());
 		break;
 	case LED_MODE_EQ:
-		led_display_set_eq(eq_level_get(0), eq_level_get(1), eq_level_get(2),
-				eq_level_get(3));
+		if (radio_playing_get())
+		{
+			led_display_set_eq(eq_level_get(0), eq_level_get(1),
+					eq_level_get(2), eq_level_get(3));
+		}
+		else
+		{
+			/* nothing playing - EQ:/STATUS: aren't arriving either, so
+			   the last-known bars would otherwise just sit there frozen
+			   and stale instead of reflecting that nothing is happening */
+			led_display_set_time(hour_get(), minute_get());
+			led_display_set_colon(1);
+		}
 		break;
 	default:
 		break;
