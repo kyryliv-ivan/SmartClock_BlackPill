@@ -10,7 +10,7 @@ HAL_StatusTypeDef aht20_init(void)
 
     HAL_Delay(40);
 
-    return HAL_I2C_Master_Transmit(&hi2c1, AHT20_ADDR, cmd, 3, HAL_MAX_DELAY);
+    return HAL_I2C_Master_Transmit(&hi2c1, AHT20_ADDR, cmd, 3, 50);
 }
 
 HAL_StatusTypeDef aht20_read(float *temperature, float *humidity)
@@ -19,14 +19,14 @@ HAL_StatusTypeDef aht20_read(float *temperature, float *humidity)
     uint8_t buf[6];
     HAL_StatusTypeDef status;
 
-    status = HAL_I2C_Master_Transmit(&hi2c1, AHT20_ADDR, cmd, 3, HAL_MAX_DELAY);
+    status = HAL_I2C_Master_Transmit(&hi2c1, AHT20_ADDR, cmd, 3, 50);
 
     if (status != HAL_OK)
         return status;
 
     HAL_Delay(80);
 
-    status = HAL_I2C_Master_Receive(&hi2c1, AHT20_ADDR, buf, 6, HAL_MAX_DELAY);
+    status = HAL_I2C_Master_Receive(&hi2c1, AHT20_ADDR, buf, 6, 50);
 
     if (status != HAL_OK)
         return status;

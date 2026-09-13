@@ -19,14 +19,17 @@
    itself, "Timing" mode is purely an interrupt source) turns it back off
    partway through, proportional to level/LED_BRIGHTNESS_MAX.
 
-   Level 10 (the top of the dial) is deliberately capped at 70% of the
+   Level 10 (the top of the dial) is deliberately capped at 40% of the
    slot, not 100% - each digit is already only lit 1 of every 4 slots from
    multiplexing alone, and going further from there felt too intense at
    the "max" setting. Every level scales off that same 70% ceiling. */
 #define MUX_SLOT_TICKS      2000
 #define LED_BRIGHTNESS_CAP_PCT 40
 
-static uint8_t brightness = 3;
+static uint8_t brightness      = 3; /* what's actually driving the PWM right now */
+static uint8_t user_brightness = 3; /* what Settings > LED Brightness is set to - kept
+                                        separate so the dial's position survives Night
+                                        Mode overriding the live value below */
 
 static uint16_t brightness_to_ccr(uint8_t level)
 {
@@ -37,6 +40,16 @@ static uint16_t brightness_to_ccr(uint8_t level)
 	if (level >= LED_BRIGHTNESS_MAX) return cap_ticks;
 	return (uint16_t) ((uint32_t) level * cap_ticks / LED_BRIGHTNESS_MAX);
 }
+
+static void apply_brightness(uint8_t level)
+{
+	brightness = level;
+	htim10.Instance->CCR1 = brightness_to_ccr(level);
+}
+
+static uint8_t night_mode_on = 0; /* forward-declared here - led_brightness_set()
+                                      below needs to check it before the rest of
+                                      the Night Mode block further down */
 
 /* digit slots hold 0-9 for real digits, or one of these symbolic glyphs -
    all indices into the same segment_map[] table below */
@@ -207,18 +220,89 @@ void led_display_set_eq(uint8_t l0, uint8_t l1, uint8_t l2, uint8_t l3)
 void led_brightness_set(uint8_t level)
 {
 	if (level > LED_BRIGHTNESS_MAX) level = LED_BRIGHTNESS_MAX;
-	brightness = level;
-	htim10.Instance->CCR1 = brightness_to_ccr(level);
+	user_brightness = level;
+
+	/* while Night Mode is on, led_night_mode_apply() owns the live value -
+	   don't stomp on it here, the dial position is just remembered for
+	   when Night Mode turns back off */
+	if (!night_mode_on) apply_brightness(level);
 }
 
-uint8_t led_brightness_get(void) { return brightness; }
+uint8_t led_brightness_get(void) { return user_brightness; }
 
 void led_brightness_adjust(int32_t delta)
 {
-	int32_t v = (int32_t) brightness + delta;
+	int32_t v = (int32_t) user_brightness + delta;
 	if (v < 0) v = 0;
 	if (v > LED_BRIGHTNESS_MAX) v = LED_BRIGHTNESS_MAX;
 	led_brightness_set((uint8_t) v);
+}
+
+/* --- Night Mode: auto-brightness from ambient light (BH1750) ------------
+   3 fixed tiers instead of a continuous curve - simpler, and a lot less
+   prone to visibly hunting between adjacent levels. Each tier has separate
+   rise/fall thresholds (Schmitt-trigger style hysteresis), so lux sitting
+   right at a boundary doesn't cause flicker between two levels. Starting
+   threshold/level numbers - expect to retune after watching real lux
+   readings across a day/night cycle. */
+typedef enum { NIGHT_TIER_DARK, NIGHT_TIER_MEDIUM, NIGHT_TIER_LIGHT } night_tier_t;
+
+#define NIGHT_LEVEL_DARK    1   /* дуже темно */
+#define NIGHT_LEVEL_MEDIUM  8   /* темніше */
+#define NIGHT_LEVEL_LIGHT   15  /* світло - LED_BRIGHTNESS_MAX */
+
+#define NIGHT_RISE_TO_MEDIUM   8.0f  /* dark   -> medium once lux climbs above this */
+#define NIGHT_FALL_TO_DARK     3.0f  /* medium -> dark   once lux drops below this */
+#define NIGHT_RISE_TO_LIGHT   60.0f  /* medium -> light  once lux climbs above this */
+#define NIGHT_FALL_TO_MEDIUM  40.0f  /* light  -> medium once lux drops below this */
+
+static night_tier_t night_tier   = NIGHT_TIER_MEDIUM; /* safe guess until the first real reading settles it */
+static float        lux_smoothed = -1.0f;             /* <0 = not seeded yet */
+
+void led_night_mode_set(uint8_t on)
+{
+	night_mode_on = on;
+	if (!on)
+	{
+		apply_brightness(user_brightness); /* hand control back to the manual dial */
+	}
+	/* turning on: led_night_mode_apply()'s next call (from main.c's
+	   periodic tick) computes and applies the right tier immediately */
+}
+
+uint8_t led_night_mode_get(void) { return night_mode_on; }
+
+static uint8_t night_tier_level(night_tier_t tier)
+{
+	switch (tier)
+	{
+	case NIGHT_TIER_DARK:  return NIGHT_LEVEL_DARK;
+	case NIGHT_TIER_LIGHT: return NIGHT_LEVEL_LIGHT;
+	default:               return NIGHT_LEVEL_MEDIUM;
+	}
+}
+
+void led_night_mode_apply(float lux)
+{
+	if (!night_mode_on) return;
+
+	lux_smoothed = (lux_smoothed < 0.0f) ? lux : (lux_smoothed * 0.85f + lux * 0.15f);
+
+	switch (night_tier)
+	{
+	case NIGHT_TIER_DARK:
+		if (lux_smoothed > NIGHT_RISE_TO_MEDIUM) night_tier = NIGHT_TIER_MEDIUM;
+		break;
+	case NIGHT_TIER_MEDIUM:
+		if (lux_smoothed < NIGHT_FALL_TO_DARK) night_tier = NIGHT_TIER_DARK;
+		else if (lux_smoothed > NIGHT_RISE_TO_LIGHT) night_tier = NIGHT_TIER_LIGHT;
+		break;
+	case NIGHT_TIER_LIGHT:
+		if (lux_smoothed < NIGHT_FALL_TO_MEDIUM) night_tier = NIGHT_TIER_MEDIUM;
+		break;
+	}
+
+	apply_brightness(night_tier_level(night_tier));
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)

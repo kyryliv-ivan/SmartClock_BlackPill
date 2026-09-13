@@ -233,6 +233,18 @@ void menu_tap(void)
 			case SETTINGS_ACTION_LED_BRIGHTNESS:
 				ui_mode = UI_LED_BRIGHTNESS;
 				break;
+			case SETTINGS_ACTION_NIGHT_MODE:
+			{
+				uint8_t on = !led_night_mode_get();
+				led_night_mode_set(on);
+
+				oled_clear();
+				oled_line_large(0, 24, on ? "Night ON" : "Night OFF");
+				oled_flush();
+				HAL_Delay(600);
+				return_to_clock();
+				break;
+			}
 			default:
 				ui_mode = UI_VOLUME;
 				break;

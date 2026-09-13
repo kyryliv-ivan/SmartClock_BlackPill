@@ -1,6 +1,12 @@
 #include "bh1750.h"
 #include "i2c.h"
 
+/* All I2C calls below use a bounded 50ms timeout, not HAL_MAX_DELAY - a
+   transient bus glitch (easy to trigger just by handling the sensor, e.g.
+   testing Night Mode by covering/uncovering it) previously froze the whole
+   main loop forever waiting on an I2C transfer that was never going to
+   complete. A timed-out read here just skips one update instead. */
+
 /* ADDR pin -> GND gives 0x23, ADDR pin -> VDD gives 0x5C */
 #define BH1750_ADDR (0x23 << 1)
 
@@ -17,17 +23,17 @@ HAL_StatusTypeDef bh1750_init(void)
     HAL_StatusTypeDef status;
 
     cmd = CMD_POWER_ON;
-    status = HAL_I2C_Master_Transmit(&hi2c1, BH1750_ADDR, &cmd, 1, HAL_MAX_DELAY);
+    status = HAL_I2C_Master_Transmit(&hi2c1, BH1750_ADDR, &cmd, 1, 50);
     if (status != HAL_OK)
         return status;
 
     cmd = CMD_RESET;
-    status = HAL_I2C_Master_Transmit(&hi2c1, BH1750_ADDR, &cmd, 1, HAL_MAX_DELAY);
+    status = HAL_I2C_Master_Transmit(&hi2c1, BH1750_ADDR, &cmd, 1, 50);
     if (status != HAL_OK)
         return status;
 
     cmd = CMD_CONT_H_RES_MODE;
-    return HAL_I2C_Master_Transmit(&hi2c1, BH1750_ADDR, &cmd, 1, HAL_MAX_DELAY);
+    return HAL_I2C_Master_Transmit(&hi2c1, BH1750_ADDR, &cmd, 1, 50);
 }
 
 HAL_StatusTypeDef bh1750_read(float *lux)
@@ -35,7 +41,7 @@ HAL_StatusTypeDef bh1750_read(float *lux)
     uint8_t buf[2];
     HAL_StatusTypeDef status;
 
-    status = HAL_I2C_Master_Receive(&hi2c1, BH1750_ADDR, buf, 2, HAL_MAX_DELAY);
+    status = HAL_I2C_Master_Receive(&hi2c1, BH1750_ADDR, buf, 2, 50);
     if (status != HAL_OK)
         return status;
 

@@ -353,6 +353,12 @@ int main(void)
 		{
 			last_read = HAL_GetTick();
 
+			/* No-op unless Night Mode is on - lux_get() itself only
+			   refreshes every ~2.1s (sensors_poll()'s round-robin), calling
+			   this more often than that just re-applies the same smoothed
+			   value, which is harmless. */
+			led_night_mode_apply(lux_get());
+
 			/* QR display is entirely menu.c's job (UI_WIFI_QR) - this loop
 			   only needs to stay out of its way via menu_active() below. */
 			if (!rtc_ok_get())

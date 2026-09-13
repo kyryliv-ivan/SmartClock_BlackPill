@@ -26,7 +26,7 @@ HAL_StatusTypeDef bmp280_init(void)
     HAL_StatusTypeDef status;
 
     status = HAL_I2C_Mem_Read(&hi2c1, BMP280_ADDR, REG_CALIB,
-                               I2C_MEMADD_SIZE_8BIT, raw, 24, HAL_MAX_DELAY);
+                               I2C_MEMADD_SIZE_8BIT, raw, 24, 50);
     if (status != HAL_OK)
         return status;
 
@@ -46,14 +46,14 @@ HAL_StatusTypeDef bmp280_init(void)
     /* temp x1, press x1, normal mode */
     cfg = 0x27;
     status = HAL_I2C_Mem_Write(&hi2c1, BMP280_ADDR, REG_CTRL,
-                                I2C_MEMADD_SIZE_8BIT, &cfg, 1, HAL_MAX_DELAY);
+                                I2C_MEMADD_SIZE_8BIT, &cfg, 1, 50);
     if (status != HAL_OK)
         return status;
 
     /* standby 62.5 ms, filter disabled */
     cfg = 0x00;
     return HAL_I2C_Mem_Write(&hi2c1, BMP280_ADDR, REG_CONFIG,
-                              I2C_MEMADD_SIZE_8BIT, &cfg, 1, HAL_MAX_DELAY);
+                              I2C_MEMADD_SIZE_8BIT, &cfg, 1, 50);
 }
 
 HAL_StatusTypeDef bmp280_read(float *temperature, float *pressure_hpa)
@@ -62,7 +62,7 @@ HAL_StatusTypeDef bmp280_read(float *temperature, float *pressure_hpa)
     HAL_StatusTypeDef status;
 
     status = HAL_I2C_Mem_Read(&hi2c1, BMP280_ADDR, REG_DATA,
-                               I2C_MEMADD_SIZE_8BIT, buf, 6, HAL_MAX_DELAY);
+                               I2C_MEMADD_SIZE_8BIT, buf, 6, 50);
 
     if (status != HAL_OK)
         return status;

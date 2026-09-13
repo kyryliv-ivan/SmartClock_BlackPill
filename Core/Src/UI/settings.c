@@ -2,7 +2,7 @@
 
 static const char *labels[] = {
 	"Set Time", "Set Date", "LED Display", "LED Interval",
-	"LED Brightness", "Volume"
+	"LED Brightness", "Night Mode", "Volume"
 };
 #define COUNT (sizeof(labels) / sizeof(labels[0]))
 
@@ -22,6 +22,7 @@ settings_action_t settings_submenu_tap(uint8_t index)
 	case 2:  return SETTINGS_ACTION_LED_SELECT;
 	case 3:  return SETTINGS_ACTION_LED_INTERVAL;
 	case 4:  return SETTINGS_ACTION_LED_BRIGHTNESS;
+	case 5:  return SETTINGS_ACTION_NIGHT_MODE;
 	default: return SETTINGS_ACTION_VOLUME;
 	}
 }
