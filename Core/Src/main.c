@@ -315,6 +315,10 @@ int main(void)
 				{
 					alarm_stop();
 					last_time[0] = '\0';
+
+					const char *cmd = "ALARM_STOP:1\n";
+					HAL_UART_Transmit(&huart1, (uint8_t*) cmd,
+							(uint16_t) strlen(cmd), 100);
 				}
 			}
 			else
@@ -374,7 +378,14 @@ int main(void)
 			} else
 			{
 				led_menu_tick();
-				alarm_check(hour_get(), minute_get());
+				if (alarm_check(hour_get(), minute_get()))
+				{
+					char cmd[20];
+					int len = sprintf(cmd, "ALARM_SOUND:%u\n",
+							(unsigned) alarm_melody_get());
+					HAL_UART_Transmit(&huart1, (uint8_t*) cmd,
+							(uint16_t) len, 100);
+				}
 
 				char time_str[16];
 				char date_str[16];

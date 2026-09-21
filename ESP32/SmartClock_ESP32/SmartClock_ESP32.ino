@@ -45,6 +45,16 @@
 //     FORGET_WIFI:1                 (WiFi submenu's Forget WiFi entry -
 //                                   erases saved creds and reboots into
 //                                   the SmartClock setup AP)
+//     ALARM_SOUND:<0-6>             (alarm just fired - index into
+//                                   alarmMelodyPaths[], plays on repeat
+//                                   until ALARM_STOP)
+//     ALARM_STOP:1                  (alarm dismissed on the STM32 side)
+//     ALARM_PREVIEW:<0-6>           (Alarm > Melody cycling - plays once,
+//                                   doesn't loop)
+//     ALARM_VOLUME:<0-10>            (Alarm > Volume - separate from the
+//                                   radio's VOLUME: above; forced during
+//                                   ALARM_SOUND/ALARM_PREVIEW, then the
+//                                   radio's own volume is restored)
 HardwareSerial stm32Serial(1);
 
 // NTP - Ukraine (EET/EEST, handles DST automatically)
@@ -53,6 +63,24 @@ const long  gmtOffsetSec = 2 * 3600;
 const int   daylightOffsetSec = 3600;
 
 Audio audio;
+
+// Audio_nopsram.h reports its own internal state (decode errors, "file not
+// found", format problems, stream/file end, etc.) exclusively through these
+// weak callbacks - without overriding them, all of that is silently
+// swallowed. Needed to actually see why a local file (alarm melody) might
+// fail to play, since connecttoFS() itself returns no per-failure detail.
+void audio_info(const char *info) {
+  Serial.print("[audio] ");
+  Serial.println(info);
+}
+void audio_eof_mp3(const char *info) {
+  Serial.print("[audio] eof_mp3: ");
+  Serial.println(info);
+}
+void audio_eof_stream(const char *info) {
+  Serial.print("[audio] eof_stream: ");
+  Serial.println(info);
+}
 
 struct RadioStation {
   const char* name;
@@ -97,6 +125,67 @@ const RadioStation stations[] = {
   { "Zahid FM",         "https://radio.zfm.com.ua:8443/zfm" },
 };
 const uint8_t STATION_COUNT = sizeof(stations) / sizeof(stations[0]);
+
+// --- Alarm melodies ---------------------------------------------------------
+// Real mp3 files, placed in the sketch's data/ folder and flashed to SPIFFS
+// via Arduino's "Sketch Data Upload" tool (separate from the normal sketch
+// Upload). Audio_nopsram.h decodes them directly with connecttoFS() - no
+// on-device synthesis needed anymore (an earlier version of this generated
+// WAV files from scratch at boot; real recordings sound better and this is
+// far less code).
+#define ALARM_MELODY_COUNT  5
+
+const char *alarmMelodyPaths[ALARM_MELODY_COUNT] = {
+  "/alarm1.mp3", "/alarm2.mp3", "/alarm3.mp3", "/alarm4.mp3", "/alarm5.mp3"
+};
+
+bool    g_alarmSoundActive = false;
+uint8_t g_alarmMelodyIndex = 0;
+
+// Tracks who currently "owns" the single shared Audio object (radio /
+// ringing alarm / one-shot melody preview) so volume can be saved and
+// restored correctly across the handoffs.
+typedef enum { AUDIO_SRC_NONE, AUDIO_SRC_RADIO, AUDIO_SRC_ALARM, AUDIO_SRC_PREVIEW } audio_src_t;
+audio_src_t g_audioSource = AUDIO_SRC_NONE;
+
+// Alarm/preview forces this volume (independent of whatever the radio is
+// set to - a quiet radio setting must never mean a quiet alarm), then
+// restores whatever the radio's volume was once the ring/preview ends.
+// 8 matches the ESP32-scale default set in setup() - same formula as
+// setVolumeFromStm32() (STM32 0-10 -> ESP32 0-21 range).
+uint8_t g_alarmVolumeRaw       = 8;
+uint8_t g_savedVolumeBeforeAlarm = 8;
+
+// Only snapshot the volume to restore later on the *first* entry into
+// alarm/preview mode - if a preview re-triggers while already previewing
+// (fast scrolling through the melody list), a second snapshot here would
+// capture g_alarmVolumeRaw itself instead of the real original level.
+void enterAlarmVolume() {
+  if (g_audioSource != AUDIO_SRC_ALARM && g_audioSource != AUDIO_SRC_PREVIEW) {
+    g_savedVolumeBeforeAlarm = audio.getVolume();
+  }
+  audio.setVolume(g_alarmVolumeRaw);
+}
+
+void playAlarmSound(uint8_t index) {
+  if (index >= ALARM_MELODY_COUNT) index = 0;
+  enterAlarmVolume();
+  g_alarmMelodyIndex = index;
+  g_alarmSoundActive = true;
+  g_audioSource = AUDIO_SRC_ALARM;
+  // stopSong() first - connecttoFS() (local file) after connecttohost()
+  // (radio stream) without it can leave the decoder in the wrong internal
+  // mode and play nothing.
+  audio.stopSong();
+  audio.connecttoFS(SPIFFS, alarmMelodyPaths[index]);
+}
+
+void stopAlarmSound() {
+  g_alarmSoundActive = false;
+  g_audioSource = AUDIO_SRC_NONE;
+  audio.stopSong();
+  audio.setVolume(g_savedVolumeBeforeAlarm);
+}
 
 bool g_wifiReady = false;
 bool g_ntpSynced = false;
@@ -176,9 +265,6 @@ void onWifiConnected() {
   g_wifiReady = true;
 
   configTime(gmtOffsetSec, daylightOffsetSec, ntpServer);
-
-  audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
-  audio.setVolume(8);
 
   playStation(g_currentStation);
 }
@@ -414,20 +500,32 @@ void eqSendIfDue() {
 
 // index 255 is a reserved "stop playback" sentinel sent by the STM32 side
 // (radio.c's "Stop" list entry), not a real station index.
+//
+// NOTE: stations[0] (Hit FM) sends a Content-Disposition header without a
+// filename= field, which crashes Audio_nopsram.cpp's parseHttpResponseHeader()
+// (NULL pointer sprintf, ~line 3575) - a bug in the vendored library itself,
+// not this code. Patch: wrap that AUDIO_INFO("Filename is %s", ...) call in
+// `if(pos1 > 0)`. Until patched, avoid auto-connecting to stations[0] on boot.
 void playStation(uint8_t index) {
   if (index == 255) {
     Serial.println("Зупинка радіо");
     audio.stopSong();
+    g_audioSource = AUDIO_SRC_NONE;
     return;
   }
 
   if (index >= STATION_COUNT) return;
 
   g_currentStation = index;
+  g_audioSource = AUDIO_SRC_RADIO;
 
   Serial.print("Перемикання станції: ");
   Serial.println(stations[index].name);
 
+  // stopSong() first - switching stations (or coming back from a local-file
+  // melody/preview) without it can leave the decoder in the wrong internal
+  // mode and play nothing.
+  audio.stopSong();
   audio.connecttohost(stations[index].url);
 }
 
@@ -451,7 +549,40 @@ void handleStm32Rx() {
     if (c == '\n') {
       rxLine[rxLen] = '\0';
 
-      if (strncmp(rxLine, "STATION:", 8) == 0) {
+      // Alarm commands work regardless of WiFi/setup-mode state - an alarm
+      // clock has to be able to ring even before it's ever been connected
+      // to a network. Checked first, unconditionally.
+      if (strncmp(rxLine, "ALARM_SOUND:", 12) == 0) {
+        playAlarmSound((uint8_t)atoi(rxLine + 12));
+      }
+      else if (strncmp(rxLine, "ALARM_STOP:", 11) == 0) {
+        stopAlarmSound();
+      }
+      else if (strncmp(rxLine, "ALARM_PREVIEW:", 14) == 0) {
+        uint8_t idx = (uint8_t)atoi(rxLine + 14);
+        if (idx >= ALARM_MELODY_COUNT) idx = 0;
+        enterAlarmVolume(); // must run before g_audioSource changes below
+        g_alarmSoundActive = false; // one-shot - don't re-trigger on EOF like a real alarm
+        g_audioSource = AUDIO_SRC_PREVIEW;
+        audio.stopSong(); // clean handoff from whatever was playing before (radio stream or another preview)
+        audio.connecttoFS(SPIFFS, alarmMelodyPaths[idx]);
+      }
+      else if (strncmp(rxLine, "ALARM_VOLUME:", 13) == 0) {
+        uint8_t vol = (uint8_t)atoi(rxLine + 13);
+        if (vol > 10) vol = 10;
+        g_alarmVolumeRaw = (uint8_t)((vol * 21 + 5) / 10); // same 0-10 -> 0-21 scaling as radio volume
+        if (g_audioSource == AUDIO_SRC_ALARM || g_audioSource == AUDIO_SRC_PREVIEW) {
+          audio.setVolume(g_alarmVolumeRaw); // already ringing/previewing - apply immediately
+        }
+      }
+      // Everything below needs a resolved WiFi state - STATION: has no
+      // network to stream from yet, and RECONNECT: switching WiFi modes
+      // mid-setup could disrupt the AP that's currently up. Deferred until
+      // setup mode ends rather than acted on and likely failing anyway.
+      else if (g_setupMode) {
+        // ignored for now
+      }
+      else if (strncmp(rxLine, "STATION:", 8) == 0) {
         playStation((uint8_t)atoi(rxLine + 8));
       }
       else if (strncmp(rxLine, "VOLUME:", 7) == 0) {
@@ -491,6 +622,15 @@ void setup() {
   WiFi.setSleep(false);
   delay(100);
 
+  // I2S/speaker setup must work with or without WiFi ever actually
+  // connecting - it used to live in onWifiConnected(), which never runs at
+  // all if the device is still sitting in the setup AP. Kept AFTER
+  // WiFi.mode() though (unlike an earlier version of this change) -
+  // initializing I2S before the WiFi radio broke audio output entirely
+  // (radio included, not just the alarm), so this ordering matters on ESP32.
+  audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
+  audio.setVolume(8);
+
   bool connected = tryConnectSaved();
 
   if (connected) {
@@ -498,22 +638,53 @@ void setup() {
   } else {
     startSetupMode();
   }
+
+  // Mounts the SPIFFS partition that "Sketch Data Upload" already flashed
+  // with the alarm mp3s (see the data/ folder) - nothing to generate
+  // anymore, just needs to be mounted before connecttoFS() can read them.
+  SPIFFS.begin();
 }
 
 void loop() {
   if (g_setupMode) {
     dnsServer.processNextRequest();
     setupServer.handleClient();
-    return; // no radio/UART traffic to STM32 while the AP is up
+    // No early return anymore - an alarm clock has to be able to ring
+    // whether or not WiFi has ever been set up. Only the genuinely
+    // WiFi-dependent bits (radio, EQ, TIME/STATUS sends) are skipped
+    // further down while setup mode is still active.
   }
 
-  if (g_wifiReady) {
+  // audio.isRunning() alone covers one-shot preview playback too (Alarm >
+  // Melody), which sets neither g_wifiReady nor g_alarmSoundActive.
+  if (g_wifiReady || g_alarmSoundActive || audio.isRunning()) {
     audio.loop();
   }
 
-  eqSendIfDue();
+  // Audio_nopsram.h only plays a file once through - re-trigger it for as
+  // long as the alarm is meant to keep ringing, so it repeats instead of
+  // going silent after ~2-3s.
+  if (g_alarmSoundActive && !audio.isRunning()) {
+    audio.connecttoFS(SPIFFS, alarmMelodyPaths[g_alarmMelodyIndex]);
+  }
 
+  // Preview clip finished - just go quiet. Radio is NOT auto-resumed (even
+  // if it was playing before the preview interrupted it) - some stations
+  // send headers that crash the reconnect (see Audio_nopsram.cpp patch
+  // notes), so leaving the radio off is both simpler and safer.
+  if (g_audioSource == AUDIO_SRC_PREVIEW && !audio.isRunning()) {
+    g_audioSource = AUDIO_SRC_NONE;
+    audio.setVolume(g_savedVolumeBeforeAlarm);
+  }
+
+  // Always drained, setup mode or not - handleStm32Rx() itself gates which
+  // individual commands actually run while g_setupMode is true (alarm
+  // commands always do; radio/WiFi ones wait, see the comment inside).
   handleStm32Rx();
+
+  if (g_setupMode) return; // EQ/TIME/STATUS below are meaningless without a resolved WiFi state
+
+  eqSendIfDue();
 
   static uint32_t lastTimeTx = 0;
   static uint32_t lastStatusTx = 0;

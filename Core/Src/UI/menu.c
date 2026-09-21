@@ -14,7 +14,8 @@
 
 typedef enum {
 	UI_CLOCK, UI_MENU, UI_SUBMENU, UI_EDIT, UI_STOPWATCH,
-	UI_LED_SELECT, UI_LED_INTERVAL, UI_VOLUME, UI_LED_BRIGHTNESS, UI_WIFI_QR
+	UI_LED_SELECT, UI_LED_INTERVAL, UI_VOLUME, UI_LED_BRIGHTNESS,
+	UI_ALARM_MELODY, UI_ALARM_VOLUME, UI_WIFI_QR
 } ui_mode_t;
 
 typedef enum {
@@ -93,6 +94,16 @@ static void return_to_clock(void)
 	clock_redraw_pending = 1;
 }
 
+/* one-shot preview (doesn't loop, unlike the real ALARM_SOUND: sent when
+   alarm_check() actually fires) - used both on entering the melody list
+   and on every rotation within it */
+static void send_alarm_preview(void)
+{
+	char cmd[20];
+	int len = sprintf(cmd, "ALARM_PREVIEW:%u\n", (unsigned) alarm_melody_get());
+	HAL_UART_Transmit(&huart1, (uint8_t*) cmd, (uint16_t) len, 100);
+}
+
 void menu_init(void)
 {
 }
@@ -154,6 +165,15 @@ void menu_rotate(int32_t delta)
 	{
 		led_brightness_adjust(delta);
 	}
+	else if (ui_mode == UI_ALARM_MELODY)
+	{
+		alarm_melody_rotate(delta);
+		send_alarm_preview(); /* hear each one as you scroll past it */
+	}
+	else if (ui_mode == UI_ALARM_VOLUME)
+	{
+		alarm_volume_adjust(delta);
+	}
 	else
 	{
 		return; /* UI_STOPWATCH - rotation does nothing */
@@ -199,6 +219,17 @@ void menu_tap(void)
 			{
 				time_editor_start_alarm(&time_ed);
 				ui_mode = UI_EDIT;
+				menu_needs_redraw = 1;
+			}
+			else if (action == ALARM_ACTION_MELODY_LIST)
+			{
+				ui_mode = UI_ALARM_MELODY;
+				menu_needs_redraw = 1;
+				send_alarm_preview(); /* hear the currently-active one right away */
+			}
+			else if (action == ALARM_ACTION_VOLUME)
+			{
+				ui_mode = UI_ALARM_VOLUME;
 				menu_needs_redraw = 1;
 			}
 			else
@@ -371,6 +402,14 @@ void menu_tap(void)
 	{
 		return_to_clock();
 	}
+	else if (ui_mode == UI_ALARM_MELODY)
+	{
+		return_to_clock();
+	}
+	else if (ui_mode == UI_ALARM_VOLUME)
+	{
+		return_to_clock();
+	}
 	else if (ui_mode == UI_WIFI_QR)
 	{
 		return_to_clock();
@@ -460,8 +499,13 @@ void menu_tick(void)
 
 	/* The full setup flow (connect phone to the AP, open the browser, pick
 	   a network, type its password, submit) realistically takes way
-	   longer than a normal menu screen. */
-	uint32_t timeout_ms = (ui_mode == UI_WIFI_QR) ? 120000 : 6000;
+	   longer than a normal menu screen. Melody preview clips also run
+	   longer than the default idle timeout, and the STM32 has no way to
+	   know when ESP32 finishes playing one - so give that screen room to
+	   just sit and listen without getting kicked back to the clock. */
+	uint32_t timeout_ms = (ui_mode == UI_WIFI_QR) ? 120000
+			: (ui_mode == UI_ALARM_MELODY) ? 30000
+			: 6000;
 
 	if (ui_mode != UI_CLOCK && ui_mode != UI_STOPWATCH
 			&& HAL_GetTick() - menu_last_activity >= timeout_ms)
@@ -590,6 +634,28 @@ void menu_draw(void)
 
 		oled_clear();
 		oled_line_small(0, 0, "LED Brightness");
+		oled_line_large(0, 16, line);
+		oled_line_small(0, 44, bar);
+		oled_flush();
+	}
+	else if (ui_mode == UI_ALARM_MELODY)
+	{
+		alarm_melody_draw();
+	}
+	else if (ui_mode == UI_ALARM_VOLUME)
+	{
+		uint8_t vol = alarm_volume_get();
+
+		char bar[ALARM_VOLUME_MAX + 1];
+		for (uint8_t i = 0; i < ALARM_VOLUME_MAX; i++)
+			bar[i] = (i < vol) ? '#' : '-';
+		bar[ALARM_VOLUME_MAX] = '\0';
+
+		char line[8];
+		sprintf(line, "%u/%u", vol, ALARM_VOLUME_MAX);
+
+		oled_clear();
+		oled_line_small(0, 0, "Alarm Volume");
 		oled_line_large(0, 16, line);
 		oled_line_small(0, 44, bar);
 		oled_flush();
