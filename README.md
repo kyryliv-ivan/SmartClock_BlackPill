@@ -41,6 +41,15 @@
   <img src="docs/images/board2_real.jpg" width="49%" alt="Плата 2 — витравлена та запаяна (вигляд знизу)">
 </p>
 
+<p align="center">
+  <img src="docs/images/clock_front_on.jpg" width="49%" alt="Годинник у зібраному корпусі, дисплей увімкнено">
+  <img src="docs/images/board_side_profile.jpg" width="49%" alt="Вигляд збоку — плати, акумулятори та роз'єм живлення">
+</p>
+
+<p align="center">
+  <img src="docs/images/board2_back_real.jpg" width="49%" alt="Плата 2 — зворотна сторона, динамік, датчики та акумулятори">
+</p>
+
 ## Меню користувача
 
 ```
