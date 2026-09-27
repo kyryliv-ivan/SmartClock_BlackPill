@@ -50,6 +50,14 @@
   <img src="docs/images/board2_back_real.jpg" width="49%" alt="Плата 2 — зворотна сторона, динамік, датчики та акумулятори">
 </p>
 
+## Відео
+
+<p align="center">
+  <a href="https://youtube.com/shorts/a_38kTbgSNQ">
+    <img src="https://img.youtube.com/vi/a_38kTbgSNQ/hqdefault.jpg" width="50%" alt="Відео роботи годинника (YouTube Shorts)">
+  </a>
+</p>
+
 ## Меню користувача
 
 ```
